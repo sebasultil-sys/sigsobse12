@@ -1,0 +1,640 @@
+import React from 'react';
+import { useGISWorkspace } from '../../app/GISWorkspaceContext';
+
+const ANALYSIS_VIEWS = [
+  { id: 'general', label: 'General' },
+  { id: 'dg', label: 'DG' },
+  { id: 'alcaldias', label: 'Alcaldías' },
+  { id: 'finanzas', label: 'Finanzas' },
+  { id: 'riesgo', label: 'Riesgo' },
+];
+
+const ANALYSIS_SCOPES = [
+  { id: 'all', label: 'Todas' },
+  { id: 'visible', label: 'Activas' },
+];
+
+function firstPropertyValue(properties, keys) {
+  for (const key of keys) {
+    const value = properties?.[key];
+    if (value !== null && value !== undefined && String(value).trim() !== '') {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function parseNumericValue(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value !== 'string') return null;
+
+  const normalized = value.replace(/[^0-9.-]+/g, '');
+  if (!normalized) return null;
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatCompactCurrency(value) {
+  if (!Number.isFinite(value)) return '—';
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)} mil M`;
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)} M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(0)} mil`;
+
+  return value.toLocaleString('es-MX', {
+    style: 'currency',
+    currency: 'MXN',
+    maximumFractionDigits: 0,
+  });
+}
+
+function formatPercent(value) {
+  return Number.isFinite(value) ? `${Math.round(value)}%` : '—';
+}
+
+function formatInteger(value) {
+  return Number.isFinite(value) ? Math.round(value).toLocaleString('es-MX') : '—';
+}
+
+function SemaforoBar({ verde, amarillo, rojo }) {
+  const total = verde + amarillo + rojo || 1;
+  return (
+    <div className="sbar">
+      <div className="sbar__seg sbar__seg--verde" style={{ width: `${(verde / total) * 100}%` }} />
+      <div className="sbar__seg sbar__seg--amarillo" style={{ width: `${(amarillo / total) * 100}%` }} />
+      <div className="sbar__seg sbar__seg--rojo" style={{ width: `${(rojo / total) * 100}%` }} />
+    </div>
+  );
+}
+
+function KpiCard({ label, value, variant, note }) {
+  return (
+    <div className={`kpi${variant ? ` kpi--${variant}` : ''}`}>
+      <span className="kpi__label">{label}</span>
+      <strong className="kpi__value">{value}</strong>
+      {note ? <span className="kpi__note">{note}</span> : null}
+    </div>
+  );
+}
+
+function DashboardChip({ active, onClick, children }) {
+  return (
+    <button
+      className={`dash-chip${active ? ' is-active' : ''}`}
+      onClick={onClick}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
+
+function InsightRow({ title, subtitle, badge, value, tone = 'default' }) {
+  return (
+    <div className={`dash-insight dash-insight--${tone}`}>
+      <div className="dash-insight__main">
+        <strong className="dash-insight__title">{title}</strong>
+        {subtitle ? <span className="dash-insight__subtitle">{subtitle}</span> : null}
+      </div>
+      <div className="dash-insight__side">
+        {badge ? <span className="dash-insight__badge">{badge}</span> : null}
+        {value ? <span className="dash-insight__value">{value}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({ title, right, children }) {
+  return (
+    <div className="dash-semaforo">
+      <div className="dash-semaforo__header">
+        <strong>{title}</strong>
+        {right ? <span>{right}</span> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function MobileDashboardPanel() {
+  const { layerMetricsById, layers } = useGISWorkspace();
+  const [activeView, setActiveView] = React.useState('general');
+  const [scope, setScope] = React.useState('all');
+
+  const databaseLayers = React.useMemo(
+    () => layers.filter((layer) => layer.databaseLayer),
+    [layers]
+  );
+
+  const scopedLayers = React.useMemo(() => {
+    if (scope === 'visible') {
+      return databaseLayers.filter((layer) => layer.visible);
+    }
+
+    return databaseLayers;
+  }, [databaseLayers, scope]);
+
+  const scopedFeatures = React.useMemo(
+    () =>
+      scopedLayers.flatMap((layer) =>
+        (layer.data?.features || []).map((feature) => ({
+          layer,
+          properties: feature?.properties || {},
+        }))
+      ),
+    [scopedLayers]
+  );
+
+  const layerBudgetById = React.useMemo(() => {
+    const budgetMap = new Map();
+
+    scopedLayers.forEach((layer) => {
+      const budget = (layer.data?.features || []).reduce((total, feature) => {
+        const amount = parseNumericValue(
+          firstPropertyValue(feature?.properties || {}, [
+            'MONTO',
+            'monto',
+            'IMPORTE',
+            'importe',
+            'PRESUPUESTO',
+            'presupuesto',
+            'INVERSION',
+            'inversion',
+            'COSTO',
+            'costo',
+            'MONTO_TOTAL',
+            'monto_total',
+            'MONTO_CONTRATO',
+            'monto_contrato',
+          ])
+        );
+
+        return total + (amount || 0);
+      }, 0);
+
+      budgetMap.set(layer.id, budget);
+    });
+
+    return budgetMap;
+  }, [scopedLayers]);
+
+  let totalAvance = 0;
+  let avanceCount = 0;
+  let totalRisk = 0;
+  let verde = 0;
+  let amarillo = 0;
+  let rojo = 0;
+
+  scopedLayers.forEach((layer) => {
+    const metrics = layerMetricsById.get(layer.id);
+    if (!metrics) return;
+
+    if (metrics.averageProgress != null) {
+      totalAvance += metrics.averageProgress;
+      avanceCount += 1;
+    }
+
+    totalRisk += metrics.riskCount || 0;
+
+    if ((metrics.riskCount || 0) === 0) verde += 1;
+    else if ((metrics.riskCount || 0) < (metrics.totalElements || 0)) amarillo += 1;
+    else rojo += 1;
+  });
+
+  const avgAvance = avanceCount > 0 ? totalAvance / avanceCount : null;
+  const avanceColor =
+    avgAvance == null ? undefined
+      : avgAvance >= 80 ? 'ok'
+      : avgAvance >= 50 ? 'warn'
+      : 'risk';
+
+  const totalBudget = Array.from(layerBudgetById.values()).reduce(
+    (total, amount) => total + amount,
+    0
+  );
+
+  const contracts = new Set();
+  const companies = new Set();
+  const alcaldiaMap = new Map();
+
+  scopedFeatures.forEach(({ properties }) => {
+    const contract = firstPropertyValue(properties, [
+      'CONTRATO',
+      'N_CONTRATO',
+      'NO_CONTRATO',
+      'NUM_CONTRATO',
+      'contrato',
+    ]);
+    if (contract) contracts.add(String(contract).trim());
+
+    const company = firstPropertyValue(properties, [
+      'EMPRESA',
+      'N_EMPRESA',
+      'CONTRATISTA',
+      'empresa',
+      'contratista',
+    ]);
+    if (company) companies.add(String(company).trim());
+
+    const alcaldia =
+      firstPropertyValue(properties, ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía']) ||
+      'Sin alcaldía';
+    const risk = properties?.RIESGO === true ? 1 : 0;
+    const advance = parseNumericValue(
+      firstPropertyValue(properties, ['AVANCE', 'avance', 'PORC_AVANCE', 'porc_avance'])
+    );
+
+    if (!alcaldiaMap.has(alcaldia)) {
+      alcaldiaMap.set(alcaldia, {
+        alcaldia,
+        records: 0,
+        risk: 0,
+        progressTotal: 0,
+        progressCount: 0,
+      });
+    }
+
+    const bucket = alcaldiaMap.get(alcaldia);
+    bucket.records += 1;
+    bucket.risk += risk;
+    if (advance != null) {
+      bucket.progressTotal += advance;
+      bucket.progressCount += 1;
+    }
+  });
+
+  const dgRows = scopedLayers
+    .reduce((map, layer) => {
+      const dg = layer.dg || 'Sin DG';
+      const metrics = layerMetricsById.get(layer.id) || {};
+      const budget = layerBudgetById.get(layer.id) || 0;
+
+      if (!map.has(dg)) {
+        map.set(dg, {
+          dg,
+          layers: 0,
+          visible: 0,
+          records: 0,
+          risk: 0,
+          progressTotal: 0,
+          progressCount: 0,
+          budget: 0,
+        });
+      }
+
+      const bucket = map.get(dg);
+      bucket.layers += 1;
+      bucket.visible += layer.visible ? 1 : 0;
+      bucket.records += layer.data?.features?.length || 0;
+      bucket.risk += metrics.riskCount || 0;
+      bucket.budget += budget;
+
+      if (metrics.averageProgress != null) {
+        bucket.progressTotal += metrics.averageProgress;
+        bucket.progressCount += 1;
+      }
+
+      return map;
+    }, new Map());
+
+  const dgSummary = Array.from(dgRows.values())
+    .map((item) => ({
+      ...item,
+      avgProgress:
+        item.progressCount > 0 ? item.progressTotal / item.progressCount : null,
+    }))
+    .sort((left, right) => {
+      if (right.risk !== left.risk) return right.risk - left.risk;
+      return right.records - left.records;
+    });
+
+  const alcaldiaSummary = Array.from(alcaldiaMap.values())
+    .map((item) => ({
+      ...item,
+      avgProgress:
+        item.progressCount > 0 ? item.progressTotal / item.progressCount : null,
+    }))
+    .sort((left, right) => {
+      if (right.records !== left.records) return right.records - left.records;
+      return right.risk - left.risk;
+    });
+
+  const financeLayers = scopedLayers
+    .map((layer) => ({
+      id: layer.id,
+      name: layer.name,
+      budget: layerBudgetById.get(layer.id) || 0,
+      progress: layerMetricsById.get(layer.id)?.averageProgress ?? null,
+    }))
+    .filter((item) => item.budget > 0)
+    .sort((left, right) => right.budget - left.budget)
+    .slice(0, 5);
+
+  const riskLayers = scopedLayers
+    .map((layer) => ({
+      layer,
+      metrics: layerMetricsById.get(layer.id) || {},
+    }))
+    .filter(({ metrics }) => (metrics.riskCount || 0) > 0)
+    .sort((left, right) => {
+      if ((right.metrics.riskCount || 0) !== (left.metrics.riskCount || 0)) {
+        return (right.metrics.riskCount || 0) - (left.metrics.riskCount || 0);
+      }
+      return (right.metrics.averageProgress || 0) - (left.metrics.averageProgress || 0);
+    });
+
+  const riskDgCount = dgSummary.filter((item) => item.risk > 0).length;
+  const criticalLayerCount = scopedLayers.filter((layer) => {
+    const metrics = layerMetricsById.get(layer.id) || {};
+    return (
+      (metrics.totalElements || 0) > 0 &&
+      (metrics.riskCount || 0) === (metrics.totalElements || 0)
+    );
+  }).length;
+
+  const topDg = dgSummary[0] || null;
+  const topAlcaldia = alcaldiaSummary[0] || null;
+  const renderGeneralView = () => (
+    <>
+      <div className="dash-kpi-grid">
+        <KpiCard
+          label="Avance promedio"
+          note={`${scopedLayers.length} capas analizadas`}
+          value={avgAvance != null ? `${Math.round(avgAvance)}%` : '—'}
+          variant={avanceColor}
+        />
+        <KpiCard
+          label="En riesgo"
+          note={`${riskDgCount} DG impactadas`}
+          value={formatInteger(totalRisk)}
+          variant={totalRisk > 0 ? 'risk' : 'ok'}
+        />
+        <KpiCard
+          label="Capas activas"
+          note={`${scope === 'visible' ? 'solo visibles' : 'catálogo de BD'}`}
+          value={formatInteger(scopedLayers.filter((layer) => layer.visible).length)}
+        />
+        <KpiCard
+          label="Registros"
+          note={`${alcaldiaSummary.length} alcaldías detectadas`}
+          value={formatInteger(scopedFeatures.length)}
+        />
+      </div>
+
+      <SummaryCard title="Semaforización de capas" right={`${scopedLayers.length} capas`}>
+        <SemaforoBar verde={verde} amarillo={amarillo} rojo={rojo} />
+        <div className="dash-semaforo__legend">
+          <span className="sdot sdot--verde" />
+          <span>{verde} sin riesgo</span>
+          <span className="sdot sdot--amarillo" />
+          <span>{amarillo} riesgo parcial</span>
+          <span className="sdot sdot--rojo" />
+          <span>{rojo} crítico</span>
+        </div>
+      </SummaryCard>
+
+      <div className="dash-risk-list">
+        <strong className="dash-section-title">Capas con elementos en riesgo</strong>
+        {scopedLayers.length === 0 ? (
+          <p className="dash-empty">No hay capas de base de datos disponibles</p>
+        ) : riskLayers.length === 0 ? (
+          <p className="dash-empty">Ninguna capa presenta riesgo activo</p>
+        ) : (
+          riskLayers.slice(0, 6).map(({ layer, metrics }) => (
+            <div className="dash-risk-row" key={layer.id}>
+              <span
+                className="dash-risk-dot"
+                style={{ background: layer.style?.color || layer.color }}
+              />
+              <span className="dash-risk-name">{layer.name}</span>
+              <span className="dash-risk-badge">{metrics.riskCount || 0} riesgo</span>
+              {metrics.averageProgress != null ? (
+                <span className="dash-risk-pct">{Math.round(metrics.averageProgress)}%</span>
+              ) : null}
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  const renderDgView = () => (
+    <>
+      <div className="dash-kpi-grid">
+        <KpiCard label="DG activas" value={formatInteger(dgSummary.length)} />
+        <KpiCard
+          label="DG con riesgo"
+          value={formatInteger(riskDgCount)}
+          variant={riskDgCount > 0 ? 'risk' : 'ok'}
+        />
+        <KpiCard
+          label="Mayor DG"
+          value={topDg ? topDg.dg : '—'}
+          note={topDg ? `${formatInteger(topDg.records)} registros` : null}
+        />
+        <KpiCard
+          label="Monto líder"
+          value={topDg ? formatCompactCurrency(topDg.budget) : '—'}
+          note={topDg ? topDg.dg : null}
+        />
+      </div>
+
+      <div className="dash-risk-list">
+        <strong className="dash-section-title">Resumen por dirección general</strong>
+        {dgSummary.length === 0 ? (
+          <p className="dash-empty">No hay DG disponibles en las capas cargadas</p>
+        ) : (
+          dgSummary.slice(0, 8).map((item) => (
+            <InsightRow
+              badge={`${item.risk} riesgo`}
+              key={item.dg}
+              subtitle={`${item.layers} capas · ${formatInteger(item.records)} registros`}
+              title={item.dg}
+              tone={item.risk > 0 ? 'risk' : 'default'}
+              value={item.avgProgress != null ? formatPercent(item.avgProgress) : formatCompactCurrency(item.budget)}
+            />
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  const renderAlcaldiasView = () => (
+    <>
+      <div className="dash-kpi-grid">
+        <KpiCard label="Alcaldías" value={formatInteger(alcaldiaSummary.length)} />
+        <KpiCard
+          label="Más obra"
+          value={topAlcaldia ? topAlcaldia.alcaldia : '—'}
+          note={topAlcaldia ? `${formatInteger(topAlcaldia.records)} registros` : null}
+        />
+        <KpiCard
+          label="En riesgo"
+          value={formatInteger(
+            alcaldiaSummary.reduce((total, item) => total + item.risk, 0)
+          )}
+          variant={
+            alcaldiaSummary.some((item) => item.risk > 0) ? 'risk' : 'ok'
+          }
+        />
+        <KpiCard
+          label="Avance medio"
+          value={
+            topAlcaldia && topAlcaldia.avgProgress != null
+              ? formatPercent(topAlcaldia.avgProgress)
+              : '—'
+          }
+          note={topAlcaldia ? topAlcaldia.alcaldia : null}
+        />
+      </div>
+
+      <div className="dash-risk-list">
+        <strong className="dash-section-title">Carga operativa por alcaldía</strong>
+        {alcaldiaSummary.length === 0 ? (
+          <p className="dash-empty">No hay alcaldías detectadas en la base</p>
+        ) : (
+          alcaldiaSummary.slice(0, 8).map((item) => (
+            <InsightRow
+              badge={`${item.risk} riesgo`}
+              key={item.alcaldia}
+              subtitle={`${formatInteger(item.records)} registros`}
+              title={item.alcaldia}
+              tone={item.risk > 0 ? 'risk' : 'default'}
+              value={item.avgProgress != null ? formatPercent(item.avgProgress) : null}
+            />
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  const renderFinanzasView = () => (
+    <>
+      <div className="dash-kpi-grid">
+        <KpiCard
+          label="Monto total"
+          note={`${formatInteger(scopedFeatures.length)} registros revisados`}
+          value={formatCompactCurrency(totalBudget)}
+          variant={totalBudget > 0 ? 'ok' : undefined}
+        />
+        <KpiCard label="Contratos" value={formatInteger(contracts.size)} />
+        <KpiCard label="Empresas" value={formatInteger(companies.size)} />
+        <KpiCard
+          label="Monto medio"
+          value={
+            contracts.size > 0
+              ? formatCompactCurrency(totalBudget / contracts.size)
+              : '—'
+          }
+          note="por contrato"
+        />
+      </div>
+
+      <div className="dash-risk-list">
+        <strong className="dash-section-title">Capas con mayor monto detectado</strong>
+        {financeLayers.length === 0 ? (
+          <p className="dash-empty">Estas capas aún no traen montos monetarios utilizables</p>
+        ) : (
+          financeLayers.map((item) => (
+            <InsightRow
+              badge={item.progress != null ? formatPercent(item.progress) : null}
+              key={item.id}
+              subtitle="Monto acumulado detectado"
+              title={item.name}
+              tone="money"
+              value={formatCompactCurrency(item.budget)}
+            />
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  const renderRiskView = () => (
+    <>
+      <div className="dash-kpi-grid">
+        <KpiCard
+          label="Riesgos totales"
+          value={formatInteger(totalRisk)}
+          variant={totalRisk > 0 ? 'risk' : 'ok'}
+        />
+        <KpiCard
+          label="Capas afectadas"
+          value={formatInteger(riskLayers.length)}
+          variant={riskLayers.length > 0 ? 'risk' : 'ok'}
+        />
+        <KpiCard
+          label="DG impactadas"
+          value={formatInteger(riskDgCount)}
+          variant={riskDgCount > 0 ? 'risk' : 'ok'}
+        />
+        <KpiCard
+          label="Capas críticas"
+          value={formatInteger(criticalLayerCount)}
+          variant={criticalLayerCount > 0 ? 'risk' : 'ok'}
+        />
+      </div>
+
+      <div className="dash-risk-list">
+        <strong className="dash-section-title">Prioridad de atención</strong>
+        {riskLayers.length === 0 ? (
+          <p className="dash-empty">No hay elementos en riesgo en este alcance</p>
+        ) : (
+          riskLayers.slice(0, 8).map(({ layer, metrics }) => (
+            <InsightRow
+              badge={`${metrics.riskCount || 0} riesgo`}
+              key={layer.id}
+              subtitle={`${formatInteger(metrics.totalElements || 0)} elementos · ${layer.dg || 'Sin DG'}`}
+              title={layer.name}
+              tone="risk"
+              value={metrics.averageProgress != null ? formatPercent(metrics.averageProgress) : null}
+            />
+          ))
+        )}
+      </div>
+    </>
+  );
+
+  let body = renderGeneralView();
+  if (activeView === 'dg') body = renderDgView();
+  if (activeView === 'alcaldias') body = renderAlcaldiasView();
+  if (activeView === 'finanzas') body = renderFinanzasView();
+  if (activeView === 'riesgo') body = renderRiskView();
+
+  return (
+    <div className="mobile-panel">
+      <div className="dash-controls">
+        <div className="dash-chip-row">
+          {ANALYSIS_VIEWS.map((view) => (
+            <DashboardChip
+              active={activeView === view.id}
+              key={view.id}
+              onClick={() => setActiveView(view.id)}
+            >
+              {view.label}
+            </DashboardChip>
+          ))}
+        </div>
+        <div className="dash-chip-row dash-chip-row--scope">
+          {ANALYSIS_SCOPES.map((item) => (
+            <DashboardChip
+              active={scope === item.id}
+              key={item.id}
+              onClick={() => setScope(item.id)}
+            >
+              {item.label}
+            </DashboardChip>
+          ))}
+        </div>
+      </div>
+
+      {body}
+    </div>
+  );
+}
+
+export default MobileDashboardPanel;

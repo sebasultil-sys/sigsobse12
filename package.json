@@ -1,0 +1,21 @@
+{
+  "name": "sigsobse-workspace",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix frontend run build",
+    "build:hostinger": "npm --prefix frontend run build:hostinger",
+    "start": "npm --prefix backend start",
+    "check": "npm --prefix backend run check && npm --prefix frontend run build"
+  },
+  "dependencies": {
+    "@turf/turf": "^7.3.4",
+    "autoprefixer": "^10.4.27",
+    "chart.js": "^4.5.1",
+    "leaflet": "^1.9.4",
+    "leaflet.heat": "^0.2.0",
+    "postcss": "^8.5.9",
+    "react-leaflet": "^5.0.0",
+    "tailwindcss": "^4.2.2",
+    "vite": "^8.0.8"
+  }
+}
