@@ -1,65 +1,114 @@
+import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
+import {
+  firstPropertyEntry,
+  formatCoordinatePair,
+  formatCurrency,
+  formatDateValue,
+  formatFieldValue,
+  formatPercent,
+  formatSignedDifference,
+  getTableroLink,
+  normalizeYear,
+  parseNumericValue,
+  renderField,
+} from './featureDetailUtils';
 
-function firstPropertyValue(properties, keys) {
-  for (const key of keys) {
-    const value = properties?.[key];
-    if (value !== null && value !== undefined && String(value).trim() !== '') {
-      return value;
-    }
-  }
+const TITLE_KEYS = [
+  'OBRA',
+  'obra',
+  'NOMBRE_OBRA',
+  'nombre_obra',
+  'NOMBRE DEL SITIO INTERVENIDO',
+  'NOMBRE DEL SITIO INTERVENIDO ',
+  'NOMBRE_SITIO_INTERVENIDO',
+  'nombre del sitio intervenido',
+  'nombre_sitio_intervenido',
+  'PLANTEL',
+  'plantel',
+  'NOMBRE_PLANTEL',
+  'nombre_plantel',
+  'G_NOMBRE',
+  'g_nombre',
+  'F_FRENTE',
+  'FRENTE',
+  'frente',
+];
 
-  return null;
-}
+const AVANCE_REAL_KEYS = [
+  'F_AV_REAL',
+  'AV_REAL',
+  'AVANCE_REAL',
+  'avance_real',
+  'AVANCE',
+  'avance',
+  'PORC_AVANCE',
+  'porc_avance',
+];
 
-function formatFieldValue(value) {
-  if (typeof value === 'boolean') return value ? 'Sí' : 'No';
+const AVANCE_PROGRAMADO_KEYS = [
+  'F_AV_PRO',
+  'AV_PRO',
+  'AVANCE_PROGRAMADO',
+  'avance_programado',
+  'PORC_PROG',
+  'porc_prog',
+  'AVANCE_PROG',
+  'avance_prog',
+];
 
-  if (typeof value === 'number') {
-    return Number.isInteger(value)
-      ? value.toLocaleString('es-MX')
-      : value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
-  }
+const ESTATUS_KEYS = ['F_ESTATUS', 'ESTATUS', 'estatus', 'ESTADO', 'estado'];
+const OBSERVACIONES_KEYS = [
+  'F_OBS',
+  'OBSERVACIONES',
+  'observaciones',
+  'OBSERVACION',
+  'observacion',
+  'OBS',
+  'obs',
+];
+const RIESGO_KEYS = ['RIESGO', 'riesgo'];
 
-  return String(value).replace(/\s+/g, ' ').trim();
-}
+const GENERAL_FIELD_CONFIGS = [
+  {
+    label: 'Dirección General',
+    keys: ['DG', 'dg', 'DIRECCION GENERAL', 'DIRECCION_GENERAL', 'direccion general', 'direccion_general'],
+  },
+  {
+    label: 'Programa',
+    keys: ['PROGRAMA', 'programa'],
+  },
+  {
+    label: 'Año',
+    keys: ['R_YEAR', 'YEAR', 'year', 'ANIO', 'anio', 'AÑO', 'año'],
+    format: normalizeYear,
+  },
+  {
+    label: 'Origen del compromiso',
+    keys: ['R_O_COMPR', 'ORIGEN_COMPROMISO', 'origen_compromiso', 'ORIGEN DEL COMPROMISO', 'origen del compromiso'],
+  },
+  {
+    label: 'Tipo',
+    keys: ['G_TIPO', 'TIPO', 'tipo', 'TIPO_OBRA', 'tipo_obra'],
+  },
+  {
+    label: 'Subtipo',
+    keys: ['G_SUBTIPO', 'SUBTIPO', 'subtipo'],
+  },
+];
 
-function formatCurrency(value) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return null;
-
-  return amount.toLocaleString('es-MX', {
-    style: 'currency',
-    currency: 'MXN',
-    maximumFractionDigits: 0,
-  });
-}
-
-function buildFeatureDetails(properties) {
-  const preferredFields = [
-    {
-      label: 'DG',
-      keys: ['DG', 'dg', 'DIRECCION GENERAL', 'DIRECCION_GENERAL', 'direccion general', 'direccion_general'],
-    },
-    { label: 'Alcaldía', keys: ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía'] },
-    { label: 'Programa', keys: ['PROGRAMA', 'programa'] },
-    { label: 'Frente', keys: ['FRENTE', 'frente'] },
-    { label: 'Colonia', keys: ['COLONIA', 'colonia'] },
-    { label: 'Tipo', keys: ['TIPO', 'tipo', 'TIPO_OBRA', 'tipo_obra'] },
-  ];
-  const details = [];
-
-  preferredFields.forEach(({ label, keys }) => {
-    const value = firstPropertyValue(properties, keys);
-    if (value == null) return;
-    details.push({ label, value: formatFieldValue(value) });
-  });
-
-  return details;
-}
-
-function buildFeatureHighlights(properties) {
-  const monto =
-    firstPropertyValue(properties, [
+const CONTRACT_FIELD_CONFIGS = [
+  {
+    label: 'Número de contrato',
+    keys: ['CONTRATO', 'N_CONTRATO', 'NO_CONTRATO', 'NUM_CONTRATO', 'contrato', 'F_CONTRATO', 'F_CONTRAT'],
+  },
+  {
+    label: 'Empresa',
+    keys: ['EMPRESA', 'N_EMPRESA', 'CONTRATISTA', 'empresa', 'contratista', 'F_EMPRESA'],
+  },
+  {
+    label: 'Monto',
+    keys: [
       'MONTO',
       'monto',
       'IMPORTE',
@@ -74,140 +123,371 @@ function buildFeatureHighlights(properties) {
       'monto_total',
       'MONTO_CONTRATO',
       'monto_contrato',
-    ]) ?? null;
+      'F_MONTO',
+    ],
+    format: (value) => formatCurrency(value) || formatFieldValue(value),
+  },
+  {
+    label: 'Fecha de inicio',
+    keys: ['FECHA_INICIO', 'fecha_inicio', 'INICIO_CONTRATO', 'inicio_contrato', 'FECHA_IN', 'F_FECHA_IN'],
+    format: formatDateValue,
+  },
+  {
+    label: 'Fecha de término',
+    keys: ['FECHA_TERMINO', 'fecha_termino', 'TERMINO_CONTRATO', 'termino_contrato', 'FECHA_TE', 'F_FECHA_TE'],
+    format: formatDateValue,
+  },
+];
 
-  const contrato = firstPropertyValue(properties, [
-    'CONTRATO',
-    'N_CONTRATO',
-    'NO_CONTRATO',
-    'NUM_CONTRATO',
-    'contrato',
-  ]);
+const GEOGRAPHIC_FIELD_CONFIGS = [
+  {
+    label: 'Calle',
+    keys: ['G_CALLE', 'CALLE', 'calle', 'DIRECCION', 'direccion', 'DIRECCIÓN', 'dirección', 'DOMICILIO', 'domicilio'],
+  },
+  {
+    label: 'Entre calles',
+    keys: ['G_ENTRE_CA', 'ENTRE CALLE', 'ENTRE_CALLE', 'entre calle', 'entre_calle', 'ENTRE_CALLES', 'entre_calles'],
+  },
+  {
+    label: 'Alcaldía',
+    keys: ['G_ALCALDIA', 'ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía'],
+  },
+];
 
-  const empresa = firstPropertyValue(properties, [
-    'EMPRESA',
-    'N_EMPRESA',
-    'CONTRATISTA',
-    'empresa',
-    'contratista',
-  ]);
+const GOOGLE_MAPS_KEYS = [
+  'G_URL_GM',
+  'URL_GOOGLE_MAPS',
+  'url_google_maps',
+  'URL_GM',
+  'url_gm',
+  'GOOGLE_MAPS',
+  'google_maps',
+];
 
-  const estatus = firstPropertyValue(properties, [
-    'ESTATUS',
-    'estatus',
-    'ESTADO',
-    'estado',
-  ]);
+const LATITUDE_KEYS = ['G_Y', 'LAT', 'LATITUD', 'lat', 'latitud', 'Y'];
+const LONGITUDE_KEYS = ['G_X', 'LON', 'LONGITUD', 'LONG', 'lng', 'X'];
 
-  return [
-    monto != null
-      ? { label: 'Monto', value: formatCurrency(monto) || formatFieldValue(monto), tone: 'money' }
-      : null,
-    contrato
-      ? { label: 'Contrato', value: formatFieldValue(contrato), tone: 'neutral' }
-      : null,
-    empresa
-      ? { label: 'Empresa', value: formatFieldValue(empresa), tone: 'neutral' }
-      : null,
-    estatus
-      ? { label: 'Estatus', value: formatFieldValue(estatus), tone: 'status' }
-      : null,
-  ].filter(Boolean);
+function resolveField(properties, config) {
+  const entry = firstPropertyEntry(properties, config.keys);
+  if (!entry) return null;
+
+  const value =
+    typeof config.format === 'function'
+      ? config.format(entry.value, properties)
+      : formatFieldValue(entry.value);
+
+  if (value === null || value === undefined || value === '') return null;
+
+  return {
+    label: config.label,
+    value,
+  };
 }
 
-function AvanceBar({ value }) {
-  const pct = Math.min(100, Math.max(0, value ?? 0));
-  const color =
-    pct >= 80 ? 'var(--mfc-green)' : pct >= 50 ? 'var(--mfc-gold)' : 'var(--mfc-red)';
+function collectFields(properties, configs) {
+  return configs.reduce((accumulator, config) => {
+    const field = resolveField(properties, config);
+    if (field) accumulator.push(field);
+    return accumulator;
+  }, []);
+}
+
+function findFirstCoordinatePair(value) {
+  if (!Array.isArray(value)) return null;
+
+  if (
+    value.length >= 2 &&
+    typeof value[0] === 'number' &&
+    typeof value[1] === 'number'
+  ) {
+    return value;
+  }
+
+  for (const item of value) {
+    const match = findFirstCoordinatePair(item);
+    if (match) return match;
+  }
+
+  return null;
+}
+
+function getRepresentativeCoordinates(feature) {
+  const pair = findFirstCoordinatePair(feature?.geometry?.coordinates);
+  if (!pair) return null;
+
+  return {
+    lng: pair[0],
+    lat: pair[1],
+  };
+}
+
+function resolveCoordinates(properties, feature) {
+  const latitudeEntry = firstPropertyEntry(properties, LATITUDE_KEYS);
+  const longitudeEntry = firstPropertyEntry(properties, LONGITUDE_KEYS);
+
+  if (latitudeEntry && longitudeEntry) {
+    const value = formatCoordinatePair(latitudeEntry.value, longitudeEntry.value);
+    if (!value) return null;
+
+    return {
+      label: 'Coordenadas',
+      value,
+      coords: {
+        lat: parseNumericValue(latitudeEntry.value),
+        lng: parseNumericValue(longitudeEntry.value),
+      },
+    };
+  }
+
+  const geometryCoords = getRepresentativeCoordinates(feature);
+  if (!geometryCoords) return null;
+
+  return {
+    label: 'Coordenadas',
+    value: formatCoordinatePair(geometryCoords.lat, geometryCoords.lng),
+    coords: geometryCoords,
+  };
+}
+
+function resolveGoogleMapsField(properties, coords) {
+  const entry = firstPropertyEntry(properties, GOOGLE_MAPS_KEYS);
+  const href = formatFieldValue(entry?.value);
+
+  if (href) {
+    return {
+      label: 'Google Maps',
+      value: (
+        <a
+          className="map-button"
+          href={href}
+          rel="noopener noreferrer"
+          target="_blank"
+        >
+          Ver ubicación
+        </a>
+      ),
+    };
+  }
+
+  if (!Number.isFinite(coords?.lat) || !Number.isFinite(coords?.lng)) {
+    return null;
+  }
+
+  return {
+    label: 'Google Maps',
+    value: (
+      <a
+        className="map-button"
+        href={`https://www.google.com/maps?q=${coords.lat},${coords.lng}`}
+        rel="noopener noreferrer"
+        target="_blank"
+      >
+        Ver ubicación
+      </a>
+    ),
+  };
+}
+
+function getProgressTone(value) {
+  if (!Number.isFinite(value)) return 'neutral';
+  if (value >= 80) return 'good';
+  if (value >= 50) return 'warn';
+  return 'risk';
+}
+
+function getStatusTone({ diferencia, estatus, isRisk }) {
+  if (isRisk) return 'risk';
+  if (Number.isFinite(diferencia) && diferencia < 0) return 'warn';
+  if (String(estatus || '').match(/terminad|concluid|finaliz/i)) return 'good';
+  return 'neutral';
+}
+
+function Section({ children, hasContent, title, variant = '' }) {
+  if (!hasContent) return null;
 
   return (
-    <div className="mfc-avance">
-      <div className="mfc-avance__meta">
-        <span>Avance</span>
-        <strong style={{ color }}>{pct}%</strong>
-      </div>
-      <div className="mfc-avance__track">
-        <div
-          className="mfc-avance__fill"
-          style={{ width: `${pct}%`, background: color }}
-        />
-      </div>
+    <div className={`info-section${variant ? ` ${variant}` : ''}`}>
+      <h3 className="section-title">{title}</h3>
+      <div className="info-grid">{children}</div>
     </div>
   );
 }
 
-function CloseIcon() {
+function ProgressBar({ value }) {
+  if (!Number.isFinite(value)) return null;
+
+  const pct = Math.min(100, Math.max(0, value));
+  const tone = getProgressTone(value);
+
   return (
-    <svg fill="none" height="18" viewBox="0 0 18 18" width="18" xmlns="http://www.w3.org/2000/svg">
-      <path d="M14 4 4 14M4 4l10 10" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
-    </svg>
+    <div className="progress-container">
+      <div className="progress-meta">
+        <span>Avance real</span>
+        <strong>{formatPercent(value)}</strong>
+      </div>
+      <div className="progress-bar">
+        <div
+          className={`progress-fill progress-fill--${tone}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="progress-text">{formatPercent(value)}</span>
+    </div>
   );
 }
 
 function MobileFeatureCard() {
-  const { actions, selectedFeature } = useGISWorkspace();
+  const { selectedFeature } = useGISWorkspace();
+  const [isOpen, setIsOpen] = React.useState(true);
+  const properties = React.useMemo(
+    () => selectedFeature?.properties || null,
+    [selectedFeature]
+  );
+  const safeProperties = React.useMemo(() => properties || {}, [properties]);
+  const tableroLink = getTableroLink(safeProperties);
 
-  if (!selectedFeature) return null;
+  React.useEffect(() => {
+    if (selectedFeature) {
+      setIsOpen(true);
+    }
+  }, [selectedFeature]);
 
-  const p = selectedFeature.properties || {};
-  const avanceValue = firstPropertyValue(p, ['AVANCE', 'avance', 'PORC_AVANCE', 'porc_avance']);
-  const avance = Number(avanceValue);
-  const isRisk = p.RIESGO === true;
+  React.useEffect(() => {
+    const handlePanelDismiss = () => {
+      setIsOpen(false);
+    };
+
+    window.addEventListener('gis-detail-panel-dismiss', handlePanelDismiss);
+
+    return () => {
+      window.removeEventListener('gis-detail-panel-dismiss', handlePanelDismiss);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!selectedFeature || process.env.NODE_ENV === 'production') return;
+
+    console.log('DATA OBRA:', safeProperties);
+    console.log('TABLERO LINK:', tableroLink, safeProperties);
+  }, [safeProperties, selectedFeature, tableroLink]);
+
+  if (!selectedFeature || !isOpen) return null;
+
   const title =
-    firstPropertyValue(p, ['OBRA', 'obra', 'NOMBRE_OBRA', 'nombre_obra', 'FRENTE', 'frente']) ||
-    selectedFeature.layerName ||
+    formatFieldValue(firstPropertyEntry(safeProperties, TITLE_KEYS)?.value) ||
+    formatFieldValue(selectedFeature.layerName) ||
     'Sin nombre';
-  const highlights = buildFeatureHighlights(p);
-  const details = buildFeatureDetails(p);
-  const hasAvance = Number.isFinite(avance) && avance >= 0;
+  const layerLabel = formatFieldValue(selectedFeature.layerName) || 'Detalle de obra';
+  const estatus = formatFieldValue(firstPropertyEntry(safeProperties, ESTATUS_KEYS)?.value);
+  const observaciones = formatFieldValue(
+    firstPropertyEntry(safeProperties, OBSERVACIONES_KEYS)?.value
+  );
+  const avanceReal = parseNumericValue(
+    firstPropertyEntry(safeProperties, AVANCE_REAL_KEYS)?.value
+  );
+  const avanceProgramado = parseNumericValue(
+    firstPropertyEntry(safeProperties, AVANCE_PROGRAMADO_KEYS)?.value
+  );
+  const diferencia =
+    Number.isFinite(avanceReal) && Number.isFinite(avanceProgramado)
+      ? avanceReal - avanceProgramado
+      : null;
+  const isRisk =
+    firstPropertyEntry(safeProperties, RIESGO_KEYS)?.value === true ||
+    String(firstPropertyEntry(safeProperties, RIESGO_KEYS)?.value || '').toLowerCase() ===
+      'true';
+
+  const generalFields = collectFields(safeProperties, GENERAL_FIELD_CONFIGS);
+  const contractFields = collectFields(safeProperties, CONTRACT_FIELD_CONFIGS);
+  const geographicFields = collectFields(safeProperties, GEOGRAPHIC_FIELD_CONFIGS);
+  const coordinatesField = resolveCoordinates(safeProperties, selectedFeature.feature);
+  const googleMapsField = resolveGoogleMapsField(
+    safeProperties,
+    coordinatesField?.coords
+  );
+
+  const statusTone = getStatusTone({ diferencia, estatus, isRisk });
+  const statusText = isRisk ? 'En riesgo' : estatus || 'Seguimiento activo';
 
   return (
     <div className="mfc">
       <div className="mfc__inner">
-        <div className="mfc__top">
-          <div className="mfc__status">
-            <span
-              className={`mfc__dot${isRisk ? ' mfc__dot--risk' : ' mfc__dot--ok'}`}
-            />
-            <span className="mfc__status-label">
-              {isRisk ? 'En riesgo' : 'Activo'}
-            </span>
-          </div>
+        <div className="panel-header">
+          <h3 className="panel-title">Detalle de obra</h3>
           <button
-            aria-label="Cerrar"
-            className="mfc__dismiss"
-            onClick={actions.clearSelectionAndTools}
+            aria-label="Minimizar detalle"
+            className="minimize-btn"
+            onClick={() => setIsOpen(false)}
             type="button"
           >
-            <CloseIcon />
+            −
           </button>
         </div>
+        {tableroLink ? (
+          <a
+            className="tablero-btn"
+            href={tableroLink}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            📊 Ver tablero
+          </a>
+        ) : null}
+        <div className="mfc__eyebrow obra-subtitle">{layerLabel}</div>
+        <h4 className="mfc__title obra-title">{title}</h4>
+        <div className={`mfc__status-line mfc__status-line--${statusTone}`}>
+          {statusText}
+        </div>
 
-        <h3 className="mfc__title">{title}</h3>
+        <Section
+          hasContent={
+            Number.isFinite(avanceReal) ||
+            Number.isFinite(avanceProgramado) ||
+            Boolean(estatus) ||
+            Boolean(observaciones)
+          }
+          title="Avance y estatus"
+          variant="info-section--primary"
+        >
+          <ProgressBar value={avanceReal} />
+          {renderField('Avance programado', formatPercent(avanceProgramado))}
+          {renderField('Diferencia', formatSignedDifference(diferencia))}
+          {renderField('Estatus', estatus)}
+          {renderField('Observaciones', observaciones)}
+        </Section>
 
-        {hasAvance && <AvanceBar value={avance} />}
+        <Section
+          hasContent={generalFields.length > 0}
+          title="Información general"
+        >
+          {generalFields.map(({ label, value }) => (
+            <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
+          ))}
+        </Section>
 
-        {highlights.length > 0 && (
-          <div className="mfc__highlights">
-            {highlights.map(({ label, value, tone }) => (
-              <div className={`mfc__highlight mfc__highlight--${tone}`} key={label}>
-                <span className="mfc__highlight-label">{label}</span>
-                <strong className="mfc__highlight-value">{value}</strong>
-              </div>
-            ))}
-          </div>
-        )}
+        <Section
+          hasContent={contractFields.length > 0}
+          title="Información contractual"
+        >
+          {contractFields.map(({ label, value }) => (
+            <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
+          ))}
+        </Section>
 
-        {details.length > 0 && (
-          <div className="mfc__details">
-            {details.map(({ label, value }) => (
-              <div className="mfc__detail-row" key={label}>
-                <span className="mfc__detail-label">{label}</span>
-                <span className="mfc__detail-value">{String(value)}</span>
-              </div>
-            ))}
-          </div>
-        )}
+        <Section
+          hasContent={
+            geographicFields.length > 0 ||
+            Boolean(coordinatesField) ||
+            Boolean(googleMapsField)
+          }
+          title="Información geográfica"
+        >
+          {geographicFields.map(({ label, value }) => (
+            <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
+          ))}
+          {coordinatesField ? renderField(coordinatesField.label, coordinatesField.value) : null}
+          {googleMapsField ? renderField(googleMapsField.label, googleMapsField.value) : null}
+        </Section>
       </div>
     </div>
   );

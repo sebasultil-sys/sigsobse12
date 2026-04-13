@@ -1,5 +1,7 @@
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 
+const SEARCH_LOGO_SRC = '/files/web/assets/img/corazon-snfondo.png';
+
 function FilterSelect({ label, options, value, onChange }) {
   return (
     <label className="data-filter">
@@ -34,8 +36,8 @@ function FiltersPanel() {
         <div>
           <h3 className="filters-panel__title">Filtros y datos</h3>
           <p className="filters-panel__subtitle">
-            Filtra la vista operativa por dirección general, programa, alcaldía
-            y nombre de obra.
+            Filtra por dirección general y programa, y busca por plantel,
+            dirección, colonia, alcaldía o programa.
           </p>
         </div>
         <button
@@ -49,7 +51,7 @@ function FiltersPanel() {
 
       <div className="filters-panel__grid">
         <FilterSelect
-          label="DG"
+          label="Dirección"
           onChange={(event) =>
             actions.updateDataFilter('dg', event.target.value)
           }
@@ -72,16 +74,27 @@ function FiltersPanel() {
           options={filterOptions.alcaldia}
           value={dataFilters.alcaldia}
         />
-        <label className="data-filter">
-          <span className="field-label">Búsqueda de obra</span>
-          <input
-            onChange={(event) =>
-              actions.updateDataFilter('obra', event.target.value)
-            }
-            placeholder="Buscar frente, obra o programa"
-            type="search"
-            value={dataFilters.obra}
-          />
+        <label className="data-filter data-filter--search">
+          <span className="field-label">Búsqueda</span>
+          <div className="search-container search-container--filter">
+            <img
+              alt="Logo institucional"
+              className="search-logo"
+              onError={(event) => {
+                event.currentTarget.style.display = 'none';
+              }}
+              src={SEARCH_LOGO_SRC}
+            />
+            <input
+              className="search-input"
+              onChange={(event) =>
+                actions.updateDataFilter('obra', event.target.value)
+              }
+              placeholder="Buscar plantel, dirección, colonia, alcaldía o programa"
+              type="search"
+              value={dataFilters.obra}
+            />
+          </div>
         </label>
       </div>
 

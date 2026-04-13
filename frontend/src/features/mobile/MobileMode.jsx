@@ -14,7 +14,7 @@ import AttributeTableSheet from './AttributeTableSheet';
 
 const SHEET_META = {
   layers:    { title: 'Capas',              subtitle: 'Administra la información visible en el mapa' },
-  search:    { title: 'Buscar',             subtitle: 'Obras, alcaldías y programas' },
+  search:    { title: 'Buscar',             subtitle: 'Obras por plantel, dirección, colonia o programa' },
   dashboard: { title: 'Indicadores',        subtitle: 'Avance, riesgos y semaforización' },
   tools:     { title: 'Herramientas',       subtitle: 'Medición, dibujo y análisis espacial' },
   more:      { title: 'Más',               subtitle: 'Leyenda, mapa base y guía de uso' },
@@ -99,7 +99,7 @@ function MobileMode() {
               type="button"
             >
               <SearchIcon />
-              <span>Buscar obra, alcaldía...</span>
+              <span>Buscar plantel, colonia...</span>
             </button>
           )}
 

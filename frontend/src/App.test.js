@@ -14,7 +14,7 @@ test('renders gis workspace shell', () => {
     root.render(<App />);
   });
 
-  expect(container.textContent).toMatch(/visualizador gis operativo/i);
+  expect(container.textContent).toMatch(/sig-sobse/i);
   expect(container.textContent).toMatch(/navegador de proyecto/i);
   expect(container.textContent).toMatch(/mapa gis/i);
 

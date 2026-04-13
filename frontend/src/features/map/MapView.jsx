@@ -11,6 +11,7 @@ import {
 } from './advancedTools';
 import { createGeoJsonLayer, getVisualState } from './GeoJsonLayer';
 import { fitVisibleLayers } from './FitVisibleLayers';
+import { getLayerStatus } from '../layers/layerStatus';
 
 const DEFAULT_CENTER = [19.4326, -99.1332];
 const DEFAULT_ZOOM = 11;
@@ -373,6 +374,7 @@ function MapView({ mode = 'desktop' }) {
     interactionMode,
     layerMetricsById,
     layers,
+    mapViewportBounds,
     measurement,
     mobileSheet,
     selectedFeature,
@@ -437,6 +439,8 @@ function MapView({ mode = 'desktop' }) {
   const [bufferRadiusKm, setBufferRadiusKm] = React.useState(1);
   const [populationRadiusKm, setPopulationRadiusKm] = React.useState(1);
   const [expandedDGs, setExpandedDGs] = React.useState({});
+  const [isDesktopFeatureCardOpen, setIsDesktopFeatureCardOpen] =
+    React.useState(true);
   React.useEffect(() => {
     if (!mapRef.current) return;
 
@@ -453,6 +457,12 @@ function MapView({ mode = 'desktop' }) {
 
 
   const isMobile = mode === 'mobile';
+  React.useEffect(() => {
+    if (selectedFeature && !isMobile) {
+      setIsDesktopFeatureCardOpen(true);
+    }
+  }, [isMobile, selectedFeature]);
+
   const visibleSignature = React.useMemo(
     () => buildVisibleSignature(filteredLayers),
     [filteredLayers]
@@ -687,9 +697,16 @@ function MapView({ mode = 'desktop' }) {
 
       const syncMapMeta = () => {
         const center = map.getCenter();
+        const bounds = map.getBounds();
         setMapMeta({
           zoom: map.getZoom(),
           center: { lat: center.lat, lng: center.lng },
+        });
+        actionsRef.current.setMapViewportBounds({
+          west: bounds.getWest(),
+          south: bounds.getSouth(),
+          east: bounds.getEast(),
+          north: bounds.getNorth(),
         });
       };
 
@@ -800,6 +817,7 @@ function MapView({ mode = 'desktop' }) {
       advancedGroupRef.current = null;
       hotspotGroupRef.current = null;
       actionsRef.current.setMapApi(null);
+      actionsRef.current.setMapViewportBounds(null);
     };
   }, [mode]);
 
@@ -1093,6 +1111,42 @@ function MapView({ mode = 'desktop' }) {
       map.off('dblclick', handleDoubleClick);
     };
   }, [actions, interactionMode, mapReadyVersion]);
+
+  React.useEffect(() => {
+    const map = mapRef.current;
+    if (
+      !map ||
+      !selectedFeature ||
+      isMeasureMode(interactionMode) ||
+      isDrawMode(interactionMode)
+    ) {
+      return undefined;
+    }
+
+    const handleDetailDismiss = (event) => {
+      const target = event?.originalEvent?.target;
+
+      if (
+        target instanceof Element &&
+        (target.closest('.leaflet-interactive') ||
+          target.closest('.leaflet-control'))
+      ) {
+        return;
+      }
+
+      window.dispatchEvent(new CustomEvent('gis-detail-panel-dismiss'));
+
+      if (!isMobile) {
+        setIsDesktopFeatureCardOpen(false);
+      }
+    };
+
+    map.on('click', handleDetailDismiss);
+
+    return () => {
+      map.off('click', handleDetailDismiss);
+    };
+  }, [interactionMode, isMobile, mapReadyVersion, selectedFeature]);
 
   React.useEffect(() => {
     const measurementGroup = measurementGroupRef.current;
@@ -1550,6 +1604,11 @@ function MapView({ mode = 'desktop' }) {
                         {dgLayers.map((layer) => {
                           const metrics = layerMetricsById.get(layer.id) || {};
                           const isRisk = (metrics.riskCount || 0) > 0;
+                          const status = getLayerStatus(
+                            layer,
+                            mapViewportBounds,
+                            metrics
+                          );
 
                           return (
                             <div
@@ -1565,13 +1624,9 @@ function MapView({ mode = 'desktop' }) {
                                 </span>
                                 <div className="lp-layer__info">
                                   <strong>{layer.name}</strong>
-                                  <span>
-                                    {layer.data?.features?.length || 0} elementos
-                                    {metrics.averageProgress != null
-                                      ? ` · ${metrics.averageProgress}% avance`
-                                      : ''}
-                                    {isRisk ? ` · ${metrics.riskCount} riesgo` : ''}
-                                  </span>
+                                  <div className="lp-layer__meta">
+                                    <span>{status.detail}</span>
+                                  </div>
                                 </div>
                                 <LayerToggle
                                   checked={layer.visible}
@@ -1738,6 +1793,7 @@ function MapView({ mode = 'desktop' }) {
     layerMetricsById,
     layers,
     layersByDG,
+    mapViewportBounds,
     visibleLayerCount,
   ]);
 
@@ -1869,9 +1925,19 @@ function MapView({ mode = 'desktop' }) {
           </div>
         ) : null}
 
-        {selectedFeature && !isMobile ? (
+        {selectedFeature && !isMobile && isDesktopFeatureCardOpen ? (
           <div className="map-view__feature-card">
-            <span className="map-view__feature-eyebrow">Elemento activo</span>
+            <div className="panel-header">
+              <span className="map-view__feature-eyebrow">Elemento activo</span>
+              <button
+                aria-label="Minimizar detalle"
+                className="minimize-btn"
+                onClick={() => setIsDesktopFeatureCardOpen(false)}
+                type="button"
+              >
+                −
+              </button>
+            </div>
             <h3>{selectedFeature.properties?.OBRA || selectedFeature.layerName}</h3>
             <dl>
               {[

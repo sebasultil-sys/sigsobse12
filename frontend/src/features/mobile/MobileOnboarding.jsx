@@ -11,7 +11,7 @@ const STEPS = [
   {
     emoji: '🔍',
     title: 'Busca cualquier obra',
-    body: 'Usa el buscador para encontrar obras por nombre, alcaldía o programa. Toca un resultado para hacer zoom automático.',
+    body: 'Usa el buscador para encontrar obras por plantel, dirección, colonia o programa. Toca un resultado para centrarlo y abrir su ficha.',
   },
   {
     emoji: '🗂️',

@@ -23,6 +23,7 @@
 
 import React from 'react';
 import { BASE_MAPS, DEFAULT_BASE_MAP_ID } from '../data/baseMaps';
+import cdmxBoundaryData from '../data/cdmxBoundary.json';
 import { fetchLayerGeoJSON, fetchLayerTables } from '../services/gisApi';
 
 // Contexto React — null es el valor default (se reemplaza por el Provider)
@@ -46,6 +47,10 @@ const DEFAULT_DATABASE_SYNC_INTERVAL_MS =
 const DATABASE_SYNC_INTERVAL_MS = Math.max(
   15000,
   Number(process.env.REACT_APP_GIS_SYNC_INTERVAL_MS || DEFAULT_DATABASE_SYNC_INTERVAL_MS)
+);
+const DATABASE_LAYER_LOAD_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.REACT_APP_GIS_LOAD_CONCURRENCY || 3)
 );
 const LEGACY_BOOTSTRAP_LAYER_PREFIX = 'bootstrap-';
 
@@ -100,15 +105,91 @@ function normalizeValue(value) {
     .trim();
 }
 
+function firstPropertyValue(properties, keys) {
+  for (const key of keys) {
+    const value = properties?.[key];
+    if (value !== null && value !== undefined && String(value).trim() !== '') {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+const FEATURE_TEXT_KEYS = {
+  plantel: [
+    'NOMBRE DEL SITIO INTERVENIDO',
+    'NOMBRE DEL SITIO INTERVENIDO ',
+    'NOMBRE_SITIO_INTERVENIDO',
+    'nombre del sitio intervenido',
+    'nombre_sitio_intervenido',
+    'PLANTEL',
+    'plantel',
+    'NOMBRE_PLANTEL',
+    'nombre_plantel',
+    'NOMBRE DEL PLANTEL',
+    'nombre del plantel',
+    'NOMBRE_ESCUELA',
+    'nombre_escuela',
+    'ESCUELA',
+    'escuela',
+    'FRENTE 1',
+    'frente 1',
+    'FRENTE1',
+    'frente1',
+    'FRENTE',
+    'frente',
+  ],
+  direccion: [
+    'CALLE',
+    'calle',
+    'DIRECCION',
+    'direccion',
+    'DIRECCIÓN',
+    'dirección',
+    'DOMICILIO',
+    'domicilio',
+    'UBICACION',
+    'ubicacion',
+    'UBICACIÓN',
+    'ubicación',
+    'ENTRE CALLE',
+    'ENTRE_CALLE',
+    'entre calle',
+    'entre_calle',
+    'REFERENCIAS',
+    'referencias',
+  ],
+  colonia: ['COLONIA', 'colonia'],
+  programa: ['PROGRAMA', 'programa'],
+  alcaldia: ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía'],
+  tipo: ['TIPO', 'tipo', 'TIPO_OBRA', 'tipo_obra'],
+};
+
+const FEATURE_FILTER_KEYS = {
+  dg: [
+    'DG',
+    'dg',
+    'DIRECCION GENERAL',
+    'DIRECCION_GENERAL',
+    'direccion general',
+    'direccion_general',
+  ],
+  programa: ['PROGRAMA', 'programa'],
+  alcaldia: ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía'],
+};
+
 // Extrae los valores únicos de una propiedad GeoJSON de todas las capas.
 // Sirve para construir los dropdowns de filtro (DG, programa, alcaldía).
 // Ejemplo: collectOptions(layers, 'DG') → ['DGCOP', 'DGSUS', 'DGOT', ...]
-function collectOptions(layers, key) {
+function collectOptions(layers, key, transformValue) {
+  const keys = Array.isArray(key) ? key : [key];
   const values = new Set();
 
   layers.forEach((layer) => {
     (layer.data?.features || []).forEach((feature) => {
-      const value = feature?.properties?.[key];
+      const rawValue = firstPropertyValue(feature?.properties, keys);
+      const value = transformValue ? transformValue(rawValue) : rawValue;
       if (value) values.add(String(value));
     });
   });
@@ -118,25 +199,31 @@ function collectOptions(layers, key) {
 
 // Determina si un feature GeoJSON pasa todos los filtros activos.
 // Se llama en el useMemo de filteredLayers para construir la vista filtrada.
-// El filtro de texto busca en varios campos al mismo tiempo (OBRA, FRENTE, etc.)
+// El filtro de texto busca en dirección, colonia y programa al mismo tiempo.
 function featureMatchesFilters(feature, filters) {
   const properties = feature?.properties || {};
 
   // Filtros exactos por categoría
-  if (filters.dg !== 'all' && String(properties.DG || '') !== filters.dg) {
+  if (
+    filters.dg !== 'all' &&
+    normalizeDG(firstPropertyValue(properties, FEATURE_FILTER_KEYS.dg)) !==
+      filters.dg
+  ) {
     return false;
   }
 
   if (
     filters.programa !== 'all' &&
-    String(properties.PROGRAMA || '') !== filters.programa
+    String(firstPropertyValue(properties, FEATURE_FILTER_KEYS.programa) || '') !==
+      filters.programa
   ) {
     return false;
   }
 
   if (
     filters.alcaldia !== 'all' &&
-    String(properties.ALCALDIA || '') !== filters.alcaldia
+    String(firstPropertyValue(properties, FEATURE_FILTER_KEYS.alcaldia) || '') !==
+      filters.alcaldia
   ) {
     return false;
   }
@@ -146,10 +233,12 @@ function featureMatchesFilters(feature, filters) {
   if (!obraQuery) return true;
 
   const searchableFields = [
-    properties.OBRA,
-    properties.FRENTE,
-    properties.PROGRAMA,
-    properties.ALCALDIA,
+    firstPropertyValue(properties, FEATURE_TEXT_KEYS.plantel),
+    firstPropertyValue(properties, FEATURE_TEXT_KEYS.direccion),
+    firstPropertyValue(properties, FEATURE_TEXT_KEYS.colonia),
+    firstPropertyValue(properties, FEATURE_TEXT_KEYS.programa),
+    firstPropertyValue(properties, FEATURE_TEXT_KEYS.alcaldia),
+    firstPropertyValue(properties, FEATURE_TEXT_KEYS.tipo),
   ]
     .filter(Boolean)
     .map(normalizeValue)
@@ -230,6 +319,13 @@ function getGeometryType(featureCollection) {
     (feature) => feature?.geometry?.type
   );
   return firstFeature?.geometry?.type || 'Unknown';
+}
+
+function createEmptyFeatureCollection() {
+  return {
+    type: 'FeatureCollection',
+    features: [],
+  };
 }
 
 // Construye el estilo inicial de una capa según su tipo de geometría.
@@ -387,8 +483,7 @@ function formatDatabaseLayerName(value) {
   const raw = String(value || '').trim();
   if (!raw) return 'Capa sin nombre';
 
-  const withoutPrefix = raw.replace(/^(?:\d{2}\s+){2,}/, '');
-  const normalizedSeparators = withoutPrefix
+  const normalizedSeparators = raw
     .replace(/[_]+/g, ' ')
     .replace(/[–—]+/g, ' - ')
     .replace(/\s+/g, ' ')
@@ -396,25 +491,43 @@ function formatDatabaseLayerName(value) {
 
   const uniqueSegments = normalizedSeparators
     .split(/\s+-\s+/)
-    .map((segment) => segment.trim())
+    .map((segment) =>
+      segment.replace(/^(?:\d{2}\s+){1,4}/, '').trim()
+    )
     .filter(Boolean)
-    .filter(
-      (segment, index, segments) =>
-        index ===
-        segments.findIndex(
-          (candidate) => normalizeValue(candidate) === normalizeValue(segment)
-        )
-    );
+    .reduce((segments, segment) => {
+      const formattedSegment = segment
+        .split(/\s+/)
+        .map((word, index) => formatInstitutionalWord(word, index))
+        .filter(Boolean)
+        .join(' ');
 
-  const formattedSegments = uniqueSegments.map((segment) =>
-    segment
-      .split(/\s+/)
-      .map((word, index) => formatInstitutionalWord(word, index))
-      .filter(Boolean)
-      .join(' ')
-  );
+      const normalizedSegment = normalizeValue(formattedSegment);
+      const existingIndex = segments.findIndex((candidate) => {
+        const normalizedCandidate = normalizeValue(candidate);
+        return (
+          normalizedCandidate === normalizedSegment ||
+          normalizedCandidate.includes(normalizedSegment) ||
+          normalizedSegment.includes(normalizedCandidate)
+        );
+      });
 
-  return formattedSegments.join(' - ') || 'Capa sin nombre';
+      if (existingIndex === -1) {
+        segments.push(formattedSegment);
+        return segments;
+      }
+
+      if (
+        normalizedSegment.length >
+        normalizeValue(segments[existingIndex]).length
+      ) {
+        segments[existingIndex] = formattedSegment;
+      }
+
+      return segments;
+    }, []);
+
+  return uniqueSegments.join(' - ') || 'Capa sin nombre';
 }
 
 // Lee el campo DG del primer feature de la capa para identificar a qué
@@ -434,6 +547,58 @@ function detectLayerDg(featureCollection) {
   return normalizeDG(rawValue);
 }
 
+function normalizeCatalogBbox(bbox) {
+  if (!bbox || typeof bbox !== 'object') return null;
+
+  const west = Number(bbox.west);
+  const south = Number(bbox.south);
+  const east = Number(bbox.east);
+  const north = Number(bbox.north);
+
+  if ([west, south, east, north].some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+
+  return { west, south, east, north };
+}
+
+function expandBounds(bounds, padding = 0) {
+  if (!bounds) return null;
+
+  return {
+    west: bounds.west - padding,
+    south: bounds.south - padding,
+    east: bounds.east + padding,
+    north: bounds.north + padding,
+  };
+}
+
+function boundsIntersect(leftBounds, rightBounds) {
+  if (!leftBounds || !rightBounds) return false;
+
+  return !(
+    leftBounds.east < rightBounds.west ||
+    leftBounds.west > rightBounds.east ||
+    leftBounds.north < rightBounds.south ||
+    leftBounds.south > rightBounds.north
+  );
+}
+
+function shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds) {
+  if (!layer?.databaseLayer || !layer.visible) return false;
+  if (!layer.loadRequested) return false;
+  if (layer.loadStatus === 'loading' || layer.loadStatus === 'loaded') return false;
+  if (layer.loadStatus === 'error') return false;
+
+  if (!mapViewportBounds) return !layer.catalogBbox;
+  if (!layer.catalogBbox) return true;
+
+  return boundsIntersect(
+    expandBounds(layer.catalogBbox, 0.005),
+    expandBounds(mapViewportBounds, 0.01)
+  );
+}
+
 // ── Constructor de definición de capa de base de datos ────────────────────────
 
 // Construye el objeto completo que representa una capa proveniente de PostgreSQL.
@@ -448,21 +613,44 @@ function buildDatabaseLayerDefinition({
 }) {
   const tableName = String(metadata?.table_name || name || '').trim();
   const layerId = existingLayer?.id || `db-${tableName}`;
-  const geometryType = getGeometryType(geoJson);
-  const enriched = enrichFeatureCollection(layerId, geoJson);
+  const hasFreshGeoJson =
+    geoJson &&
+    geoJson.type === 'FeatureCollection' &&
+    Array.isArray(geoJson.features);
+  const baseCollection =
+    hasFreshGeoJson
+      ? geoJson
+      : existingLayer?.data || createEmptyFeatureCollection();
+  const geometryType = hasFreshGeoJson
+    ? getGeometryType(geoJson)
+    : existingLayer?.geometryType || 'Unknown';
+  const enriched = enrichFeatureCollection(layerId, baseCollection);
   const color = existingLayer?.color || getStableColor(tableName);
   const baseStyle = buildLayerStyle(color, geometryType);
-  const dg = detectLayerDg(enriched);
+  const dg = normalizeDG(
+    metadata?.dg || existingLayer?.dg || detectLayerDg(enriched)
+  );
   const displayName = formatDatabaseLayerName(name || tableName);
+  const estimatedFeatureCount = Math.max(
+    0,
+    Number(metadata?.estimated_count ?? existingLayer?.estimatedFeatureCount ?? 0)
+  );
+  const loadStatus = hasFreshGeoJson
+    ? 'loaded'
+    : existingLayer?.loadStatus || 'idle';
+  const loadError = hasFreshGeoJson ? null : existingLayer?.loadError || null;
+  const catalogBbox = normalizeCatalogBbox(
+    metadata?.bbox || existingLayer?.catalogBbox
+  );
 
   return {
     id: layerId,
     name: displayName,
-    // Conserva la visibilidad que tenía si ya existía; las nuevas capas empiezan visibles
+    // Conserva la visibilidad que tenía si ya existía; las nuevas capas arrancan apagadas.
     visible:
       typeof existingLayer?.visible === 'boolean'
         ? existingLayer.visible
-        : true,
+        : false,
     color,
     source: 'PostgreSQL',
     dg,
@@ -487,7 +675,94 @@ function buildDatabaseLayerDefinition({
     databaseSchema: metadata?.table_schema || 'sig_sobse',
     databaseSourceType: metadata?.source_type || 'postgis',
     databaseGeometryColumn: metadata?.geometry_column || 'geom',
+    databaseMetadata: {
+      ...(existingLayer?.databaseMetadata || {}),
+      ...(metadata || {}),
+      table_name: tableName,
+    },
+    catalogBbox,
+    estimatedFeatureCount,
+    loadStatus,
+    loadError,
+    loadRequested:
+      typeof existingLayer?.loadRequested === 'boolean'
+        ? existingLayer.loadRequested
+        : false,
   };
+}
+
+function buildReferenceLayerDefinition({
+  id,
+  name,
+  featureCollection,
+  color = '#691c32',
+  source = 'Referencia oficial',
+  visible = true,
+}) {
+  const geometryType = getGeometryType(featureCollection);
+  const data = enrichFeatureCollection(id, featureCollection);
+  const style = {
+    ...buildLayerStyle(color, geometryType),
+    weight: geometryType === 'LineString' || geometryType === 'MultiLineString' ? 3 : 2,
+    fillOpacity: 0,
+    opacity: 0.9,
+  };
+
+  return {
+    id,
+    name,
+    visible,
+    color,
+    source,
+    dg: null,
+    programa: null,
+    alcaldia: null,
+    data,
+    geometryType,
+    style,
+    initialStyle: { ...style },
+    uploaded: false,
+    referenceLayer: true,
+  };
+}
+
+function createInitialLayers() {
+  return [
+    buildReferenceLayerDefinition({
+      id: 'reference-cdmx-boundary',
+      name: 'Limite de la CDMX',
+      featureCollection: cdmxBoundaryData,
+    }),
+  ];
+}
+
+function mergeDatabaseLayers(currentLayers, layerPayloads, orderedTableNames) {
+  const tableOrder = Array.isArray(orderedTableNames) ? orderedTableNames : [];
+  const nonDatabaseLayers = currentLayers.filter((layer) => !layer.databaseLayer);
+  const databaseLayersByTable = new Map(
+    currentLayers
+      .filter((layer) => layer.databaseLayer)
+      .map((layer) => [layer.databaseTable, layer])
+  );
+
+  layerPayloads.forEach(({ tableName, geoJson, metadata }) => {
+    const existingLayer = databaseLayersByTable.get(tableName);
+    databaseLayersByTable.set(
+      tableName,
+      buildDatabaseLayerDefinition({
+        existingLayer,
+        geoJson,
+        metadata,
+        name: tableName,
+      })
+    );
+  });
+
+  const nextDatabaseLayers = tableOrder
+    .map((tableName) => databaseLayersByTable.get(tableName))
+    .filter(Boolean);
+
+  return [...nonDatabaseLayers, ...nextDatabaseLayers];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,7 +772,9 @@ function buildDatabaseLayerDefinition({
 export function GISWorkspaceProvider({ children }) {
   // El visor arranca sin capas locales demo.
   // Las capas operativas llegan desde PostgreSQL y se sincronizan por la API.
-  const initialLayersRef = React.useRef([]);
+  const initialLayersRef = React.useRef(createInitialLayers());
+  const databaseSyncInFlightRef = React.useRef(false);
+  const databaseLoadInFlightRef = React.useRef(new Map());
 
   // Ref auxiliar para detectar transiciones de desktop → móvil
   // y ocultar capas automáticamente cuando el visor entra en modo compacto.
@@ -505,9 +782,7 @@ export function GISWorkspaceProvider({ children }) {
 
   // ── Estado principal de capas y selección ──────────────────────────────────
   const [layers, setLayers] = React.useState(initialLayersRef.current);
-  const [selectedLayerId, setSelectedLayerId] = React.useState(
-    initialLayersRef.current[0]?.id || null
-  );
+  const [selectedLayerId, setSelectedLayerId] = React.useState(null);
   const [selectedFeature, setSelectedFeature] = React.useState(null);
 
   // hoveredLayerId: capa bajo el cursor del mouse en el panel de capas
@@ -538,6 +813,7 @@ export function GISWorkspaceProvider({ children }) {
 
   // mapApi: referencia al objeto Leaflet map que expone MapView hacia arriba
   const [mapApi, setMapApi] = React.useState(null);
+  const [mapViewportBounds, setMapViewportBounds] = React.useState(null);
 
   // clearSignal: contador que incrementa para avisar a MapView que limpie dibujos
   // (mejor que un boolean porque siempre dispara el effect aunque ya fuera true)
@@ -600,103 +876,47 @@ export function GISWorkspaceProvider({ children }) {
   }, []);
 
   // ── Effect: sincronización periódica con la base de datos ─────────────────
-  // Al montar la app, consulta el catálogo de capas del backend y descarga
-  // el GeoJSON de todas las tablas con geometría en PARALELO (Promise.allSettled).
-  // Luego repite la consulta cada DATABASE_SYNC_INTERVAL_MS (30 segundos).
-  //
-  // Optimizaciones clave:
-  //   - Promise.allSettled: todas las capas se descargan simultáneamente
-  //   - Si una capa falla, las demás siguen adelante (no bloquea todo)
-  //   - La variable `cancelled` evita actualizar el estado si el componente
-  //     se desmontó mientras esperábamos la respuesta del servidor
+  // Al montar la app, consulta el catálogo de capas y crea definiciones stub
+  // con metadatos (bbox, DG, conteo estimado). Las geometrías se descargan
+  // después, solo cuando la capa visible entra al viewport actual.
   React.useEffect(() => {
     if (typeof window === 'undefined') return undefined;
 
     let cancelled = false;
 
     const syncDatabaseLayers = async () => {
+      if (databaseSyncInFlightRef.current) return;
+      databaseSyncInFlightRef.current = true;
+
       try {
-        // 1. Pedir el catálogo de tablas (nombres + si tienen geometría)
         const catalog = await fetchLayerTables();
         const tables = Array.isArray(catalog?.tables) ? catalog.tables : [];
 
-        // 2. Filtrar solo las que tienen columna geom antes de hacer fetch
-        //    (ahorramos peticiones para tablas alfanuméricas sin geometría)
         const geomTables = tables.filter((tableInfo) => {
           const tableName = String(
             tableInfo?.name || tableInfo?.table_name || ''
           ).trim();
           return tableName && tableInfo?.has_geom;
         });
-
-        // 3. Descargar el GeoJSON de TODAS las capas al mismo tiempo
-        //    Promise.allSettled no cancela todo si una falla — registra cada resultado por separado
-        const results = await Promise.allSettled(
-          geomTables.map(async (tableInfo) => {
-            const tableName = String(
-              tableInfo?.name || tableInfo?.table_name || ''
-            ).trim();
-
-            const geoJson = await fetchLayerGeoJSON(tableName);
-
-            if (!geoJson || !Array.isArray(geoJson.features)) {
-              throw new Error(`GeoJSON inválido para ${tableName}`);
-            }
-
-            if (!geoJson.features.length) {
-              throw new Error(`Sin features en ${tableName}`);
-            }
-
-            return { tableName, geoJson, metadata: tableInfo };
-          })
+        const orderedTableNames = geomTables.map((tableInfo) =>
+          String(tableInfo?.name || tableInfo?.table_name || '').trim()
         );
 
-        // Salir si el componente ya fue desmontado mientras esperábamos
         if (cancelled) return;
 
-        // 4. Separar las descargas exitosas de las fallidas
-        const collectedLayers = results
-          .filter((result) => result.status === 'fulfilled')
-          .map((result) => result.value);
-
-        // Loguear las fallidas sin bloquear la carga de las exitosas
-        results
-          .filter((result) => result.status === 'rejected')
-          .forEach((result) => {
-            console.warn('[GIS API]', result.reason?.message || result.reason);
-          });
-
-        // 5. Actualizar el estado React de forma atómica
-        //    Para cada tabla exitosa: si ya existía una capa, la actualiza conservando
-        //    el estilo del usuario; si es nueva, la añade al final de la lista.
-        setLayers((currentLayers) => {
-          // Separar capas que NO vienen de la BD (subidas por el usuario, bootstrap)
-          const nonDatabaseLayers = currentLayers.filter(
-            (layer) => !layer.databaseLayer
-          );
-
-          // Índice de capas de BD existentes → permite buscar rápido por nombre de tabla
-          const existingDatabaseLayers = new Map(
-            currentLayers
-              .filter((layer) => layer.databaseLayer)
-              .map((layer) => [layer.databaseTable, layer])
-          );
-
-          const nextDatabaseLayers = collectedLayers.map(
-            ({ tableName, geoJson, metadata }) => {
-              const existingLayer = existingDatabaseLayers.get(tableName);
-              return buildDatabaseLayerDefinition({
-                existingLayer,
-                geoJson,
-                metadata,
-                name: tableName,
-              });
-            }
-          );
-
-          // Las capas no-BD van primero, luego las de BD al fondo del stack del mapa
-          return [...nonDatabaseLayers, ...nextDatabaseLayers];
-        });
+        setLayers((currentLayers) =>
+          mergeDatabaseLayers(
+            currentLayers,
+            geomTables.map((tableInfo) => ({
+              tableName: String(
+                tableInfo?.name || tableInfo?.table_name || ''
+              ).trim(),
+              geoJson: null,
+              metadata: tableInfo,
+            })),
+            orderedTableNames
+          )
+        );
       } catch (error) {
         if (!cancelled) {
           console.warn(
@@ -704,6 +924,8 @@ export function GISWorkspaceProvider({ children }) {
             error
           );
         }
+      } finally {
+        databaseSyncInFlightRef.current = false;
       }
     };
 
@@ -721,6 +943,119 @@ export function GISWorkspaceProvider({ children }) {
     };
   }, []); // array vacío → solo corre una vez al montar la app
 
+  const ensureDatabaseLayerLoaded = React.useCallback(async (layer) => {
+    const tableName = String(layer?.databaseTable || '').trim();
+    if (!tableName) return;
+
+    const existingRequest = databaseLoadInFlightRef.current.get(tableName);
+    if (existingRequest) {
+      await existingRequest;
+      return;
+    }
+
+    const requestPromise = (async () => {
+      setLayers((currentLayers) =>
+        currentLayers.map((currentLayer) =>
+          currentLayer.databaseTable === tableName
+            ? {
+                ...currentLayer,
+                loadStatus: 'loading',
+                loadError: null,
+              }
+            : currentLayer
+        )
+      );
+
+      try {
+        const geoJson = await fetchLayerGeoJSON(tableName);
+
+        if (!geoJson || !Array.isArray(geoJson.features)) {
+          throw new Error(`GeoJSON inválido para ${tableName}`);
+        }
+
+        setLayers((currentLayers) => {
+          const existingLayer = currentLayers.find(
+            (currentLayer) =>
+              currentLayer.databaseLayer &&
+              currentLayer.databaseTable === tableName
+          );
+
+          if (!existingLayer) return currentLayers;
+
+          return mergeDatabaseLayers(
+            currentLayers,
+            [
+              {
+                tableName,
+                geoJson,
+                metadata: existingLayer.databaseMetadata || {
+                  table_name: tableName,
+                },
+              },
+            ],
+            currentLayers
+              .filter((currentLayer) => currentLayer.databaseLayer)
+              .map((currentLayer) => currentLayer.databaseTable)
+          );
+        });
+      } catch (error) {
+        console.warn('[GIS API]', error?.message || error);
+        setLayers((currentLayers) =>
+          currentLayers.map((currentLayer) =>
+            currentLayer.databaseTable === tableName
+              ? {
+                  ...currentLayer,
+                  loadStatus: 'error',
+                  loadError:
+                    error instanceof Error
+                      ? error.message
+                      : 'No se pudo cargar la capa.',
+                }
+              : currentLayer
+          )
+        );
+      }
+    })().finally(() => {
+      databaseLoadInFlightRef.current.delete(tableName);
+    });
+
+    databaseLoadInFlightRef.current.set(tableName, requestPromise);
+    await requestPromise;
+  }, []);
+
+  React.useEffect(() => {
+    const candidateLayers = layers.filter((layer) =>
+      shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds)
+    );
+
+    if (!candidateLayers.length) return undefined;
+
+    let cancelled = false;
+    const queue = [...candidateLayers];
+    const workerCount = Math.min(
+      DATABASE_LAYER_LOAD_CONCURRENCY,
+      queue.length
+    );
+
+    const loadVisibleLayers = async () => {
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          while (queue.length && !cancelled) {
+            const nextLayer = queue.shift();
+            if (!nextLayer) return;
+            await ensureDatabaseLayerLoaded(nextLayer);
+          }
+        })
+      );
+    };
+
+    loadVisibleLayers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureDatabaseLayerLoaded, layers, mapViewportBounds]);
+
   // ── Valores derivados ──────────────────────────────────────────────────────
 
   // Objeto del mapa base actualmente seleccionado (contiene URL de tiles, nombre, etc.)
@@ -731,9 +1066,9 @@ export function GISWorkspaceProvider({ children }) {
   // useMemo evita recalcular en cada render — solo recalcula cuando cambia `layers`.
   const filterOptions = React.useMemo(
     () => ({
-      dg: collectOptions(layers, 'DG'),
-      programa: collectOptions(layers, 'PROGRAMA'),
-      alcaldia: collectOptions(layers, 'ALCALDIA'),
+      dg: collectOptions(layers, FEATURE_FILTER_KEYS.dg, normalizeDG),
+      programa: collectOptions(layers, FEATURE_FILTER_KEYS.programa),
+      alcaldia: collectOptions(layers, FEATURE_FILTER_KEYS.alcaldia),
     }),
     [layers]
   );
@@ -853,6 +1188,7 @@ export function GISWorkspaceProvider({ children }) {
       setDrawDraft,
       setDrawItems,
       setMapApi,
+      setMapViewportBounds,
       setMobileSheet,
 
       // ── Acciones de visibilidad de capas ───────────────────────────────
@@ -862,7 +1198,29 @@ export function GISWorkspaceProvider({ children }) {
         setLayers((currentLayers) =>
           currentLayers.map((layer) =>
             layer.id === layerId
-              ? { ...layer, visible: !layer.visible }
+              ? (() => {
+                  const nextVisible = !layer.visible;
+                  return {
+                    ...layer,
+                    visible: nextVisible,
+                    loadRequested:
+                      layer.databaseLayer && nextVisible
+                        ? true
+                        : layer.loadRequested,
+                    loadStatus:
+                      nextVisible &&
+                      layer.databaseLayer &&
+                      layer.loadStatus === 'error'
+                        ? 'idle'
+                        : layer.loadStatus,
+                    loadError:
+                      nextVisible &&
+                      layer.databaseLayer &&
+                      layer.loadStatus === 'error'
+                        ? null
+                        : layer.loadError,
+                  };
+                })()
               : layer
           )
         );
@@ -871,7 +1229,22 @@ export function GISWorkspaceProvider({ children }) {
       // Pone todas las capas como visibles (true) u ocultas (false)
       setAllLayersVisible(visible) {
         setLayers((currentLayers) =>
-          currentLayers.map((layer) => ({ ...layer, visible }))
+          currentLayers.map((layer) => ({
+            ...layer,
+            visible,
+            loadRequested:
+              visible && layer.databaseLayer
+                ? true
+                : layer.loadRequested,
+            loadStatus:
+              visible && layer.databaseLayer && layer.loadStatus === 'error'
+                ? 'idle'
+                : layer.loadStatus,
+            loadError:
+              visible && layer.databaseLayer && layer.loadStatus === 'error'
+                ? null
+                : layer.loadError,
+          }))
         );
       },
 
@@ -882,6 +1255,22 @@ export function GISWorkspaceProvider({ children }) {
           currentLayers.map((layer) => ({
             ...layer,
             visible: layer.id === layerId,
+            loadRequested:
+              layer.id === layerId && layer.databaseLayer
+                ? true
+                : layer.loadRequested,
+            loadStatus:
+              layer.id === layerId &&
+              layer.databaseLayer &&
+              layer.loadStatus === 'error'
+                ? 'idle'
+                : layer.loadStatus,
+            loadError:
+              layer.id === layerId &&
+              layer.databaseLayer &&
+              layer.loadStatus === 'error'
+                ? null
+                : layer.loadError,
           }))
         );
         setSelectedLayerId(layerId);
@@ -1124,7 +1513,13 @@ export function GISWorkspaceProvider({ children }) {
       // sin selección, modo selección, mapa base por defecto.
       resetWorkspace() {
         setLayers((currentLayers) =>
-          currentLayers.filter((layer) => layer.databaseLayer)
+          currentLayers
+            .filter((layer) => layer.databaseLayer || layer.referenceLayer)
+            .map((layer) => ({
+              ...layer,
+              visible: layer.referenceLayer ? true : false,
+              loadRequested: layer.referenceLayer ? layer.loadRequested : false,
+            }))
         );
         setSelectedLayerId(null);
         setSelectedFeature(null);
@@ -1168,6 +1563,7 @@ export function GISWorkspaceProvider({ children }) {
       layerSearchResults,
       layers,
       mapApi,
+      mapViewportBounds,
       measurement,
       mobileModeManual,
       mobileSheet,
@@ -1198,6 +1594,7 @@ export function GISWorkspaceProvider({ children }) {
       layerSearchResults,
       layers,
       mapApi,
+      mapViewportBounds,
       measurement,
       mobileModeManual,
       mobileSheet,

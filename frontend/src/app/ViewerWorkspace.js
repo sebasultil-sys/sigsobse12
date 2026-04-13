@@ -9,13 +9,14 @@ function ViewerWorkspaceLayout() {
   const {
     activeBaseMap,
     filteredFeatureCount,
+    isCompactViewport,
     isMobileModeActive,
     layers,
     visibleLayerCount,
   } = useGISWorkspace();
 
   return (
-    <div className="viewer-shell">
+    <div className={`viewer-shell${isCompactViewport ? ' viewer-shell--compact' : ''}`}>
       {!isMobileModeActive ? (
         <>
           <WorkspaceHeader

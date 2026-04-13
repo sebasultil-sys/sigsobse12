@@ -47,7 +47,7 @@ function LayerPanel({
               <strong>{layers.length}</strong>
             </div>
             <div className="layer-toolbar__stat">
-              <span>Encendidas</span>
+              <span>Activas</span>
               <strong>{visibleCount}</strong>
             </div>
           </div>

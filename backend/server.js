@@ -116,11 +116,52 @@ app.use((error, req, res, next) => {
 let catalogCache = null;
 let catalogCacheTime = 0;
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos en milisegundos
+const DEFAULT_LAYER_CACHE_TTL_MS =
+  process.env.NODE_ENV === 'production' ? 5 * 60 * 1000 : 60 * 1000;
+const LAYER_CACHE_TTL_MS = Math.max(
+  15000,
+  Number(process.env.GIS_LAYER_CACHE_TTL_MS || DEFAULT_LAYER_CACHE_TTL_MS)
+);
+const CATALOG_SUMMARY_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.GIS_CATALOG_SUMMARY_CONCURRENCY || 2)
+);
+const layerGeoJsonCache = new Map();
+const layerGeoJsonInFlight = new Map();
 
 // Borra el caché para forzar una nueva consulta a PostgreSQL
 function invalidateCatalogCache() {
   catalogCache = null;
   catalogCacheTime = 0;
+}
+
+function invalidateLayerGeoJsonCache(tableName = null) {
+  if (tableName) {
+    layerGeoJsonCache.delete(tableName);
+    layerGeoJsonInFlight.delete(tableName);
+    return;
+  }
+
+  layerGeoJsonCache.clear();
+  layerGeoJsonInFlight.clear();
+}
+
+function getValidCatalogCache() {
+  if (!catalogCache) return null;
+  if (Date.now() - catalogCacheTime >= CATALOG_CACHE_TTL_MS) return null;
+  return catalogCache;
+}
+
+function getCachedLayerGeoJson(tableName) {
+  const cached = layerGeoJsonCache.get(tableName);
+  if (!cached) return null;
+
+  if (Date.now() - cached.cachedAt >= LAYER_CACHE_TTL_MS) {
+    layerGeoJsonCache.delete(tableName);
+    return null;
+  }
+
+  return cached.geojson;
 }
 
 function logBackend(...args) {
@@ -194,6 +235,113 @@ function isGeometryColumn(column) {
   );
 }
 
+function normalizeCatalogKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .trim();
+}
+
+const DG_COLUMN_CANDIDATES = new Set([
+  'DG',
+  'DIRECCIONGENERAL',
+]);
+
+function findColumnByCandidates(columns, candidates) {
+  return (
+    (columns || []).find((column) =>
+      candidates.has(normalizeCatalogKey(column?.column_name))
+    ) || null
+  );
+}
+
+async function getTableEstimatedFeatureCount(tableName) {
+  const result = await query(
+    `
+      SELECT GREATEST(c.reltuples::bigint, 0)::bigint AS estimated_count
+      FROM pg_class AS c
+      INNER JOIN pg_namespace AS n
+        ON n.oid = c.relnamespace
+      WHERE n.nspname = $1
+        AND c.relname = $2
+      LIMIT 1
+    `,
+    [GIS_SCHEMA, tableName]
+  );
+
+  return Number(result.rows[0]?.estimated_count || 0);
+}
+
+async function getTableEstimatedBbox(tableName, geometryColumn) {
+  const result = await query(
+    `
+      SELECT
+        ST_XMin(extent_box) AS west,
+        ST_YMin(extent_box) AS south,
+        ST_XMax(extent_box) AS east,
+        ST_YMax(extent_box) AS north
+      FROM (
+        SELECT ST_EstimatedExtent($1, $2, $3) AS extent_box
+      ) AS ext
+      WHERE extent_box IS NOT NULL
+    `,
+    [GIS_SCHEMA, tableName, geometryColumn]
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+
+  const west = Number(row.west);
+  const south = Number(row.south);
+  const east = Number(row.east);
+  const north = Number(row.north);
+
+  if (
+    [west, south, east, north].some((value) => !Number.isFinite(value))
+  ) {
+    return null;
+  }
+
+  return { west, south, east, north };
+}
+
+async function getTableSampleTextValue(tableName, columnName) {
+  if (!columnName) return null;
+
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const safeTable = quoteIdentifier(tableName);
+  const safeColumn = quoteIdentifier(columnName);
+  const result = await query(
+    `
+      SELECT ${safeColumn}::text AS value
+      FROM ${safeSchema}.${safeTable}
+      WHERE ${safeColumn} IS NOT NULL
+        AND BTRIM(${safeColumn}::text) <> ''
+      LIMIT 1
+    `
+  );
+
+  return String(result.rows[0]?.value || '').trim() || null;
+}
+
+async function getLayerCatalogSummary(tableName, geometryColumn, columns) {
+  const dgColumn = findColumnByCandidates(columns, DG_COLUMN_CANDIDATES);
+
+  const estimatedCount = await getTableEstimatedFeatureCount(tableName);
+  const bbox = await getTableEstimatedBbox(tableName, geometryColumn);
+  const dg = dgColumn
+    ? await getTableSampleTextValue(tableName, dgColumn.column_name)
+    : null;
+
+  return {
+    estimated_count: estimatedCount,
+    bbox,
+    dg,
+  };
+}
+
 // ── Consultas a information_schema ───────────────────────────────────────────
 
 // Devuelve todas las tablas del schema sig_sobse.
@@ -231,6 +379,39 @@ async function getTableColumns(tableName) {
   return result.rows;
 }
 
+async function getSchemaColumns() {
+  const result = await query(
+    `
+      SELECT table_name, column_name, data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = $1
+      ORDER BY table_name ASC, ordinal_position ASC
+    `,
+    [GIS_SCHEMA]
+  );
+
+  return result.rows;
+}
+
+async function mapWithConcurrency(items, workerLimit, iteratee) {
+  const results = new Array(items.length);
+  const queue = items.map((item, index) => ({ item, index }));
+  const limit = Math.max(1, Math.min(workerLimit, items.length || 1));
+
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      while (queue.length) {
+        const next = queue.shift();
+        if (!next) return;
+
+        results[next.index] = await iteratee(next.item, next.index);
+      }
+    })
+  );
+
+  return results;
+}
+
 // ── Catálogo de capas ─────────────────────────────────────────────────────────
 
 // Construye el catálogo completo: lista de tablas con metadatos.
@@ -239,20 +420,52 @@ async function getTableColumns(tableName) {
 // El resultado se guarda en caché 5 minutos para no repetir el escaneo.
 async function getLayerCatalog() {
   // Devuelve el catálogo desde caché si está vigente
-  if (catalogCache && Date.now() - catalogCacheTime < CATALOG_CACHE_TTL_MS) {
-    return catalogCache;
-  }
+  const validCatalogCache = getValidCatalogCache();
+  if (validCatalogCache) return validCatalogCache;
 
   logBackend(`[GIS API] Consultando schema "${GIS_SCHEMA}" para catálogo de tablas...`);
 
   const tables = await getSchemaTables();
+  const schemaColumns = await getSchemaColumns();
+  const columnsByTable = schemaColumns.reduce((accumulator, column) => {
+    const tableName = String(column?.table_name || '').trim();
+    if (!tableName) return accumulator;
 
-  // Consultar columnas de TODAS las tablas en paralelo (antes era secuencial)
-  const columnResults = await Promise.all(
-    tables.map((table) => {
+    const currentColumns = accumulator.get(tableName) || [];
+    currentColumns.push(column);
+    accumulator.set(tableName, currentColumns);
+    return accumulator;
+  }, new Map());
+
+  const columnResults = tables.map((table) => {
+    const tableName = String(table?.table_name || '').trim();
+    return tableName ? columnsByTable.get(tableName) || [] : [];
+  });
+
+  const catalogSummaries = await mapWithConcurrency(
+    tables.map((table, index) => {
       const tableName = String(table?.table_name || '').trim();
-      return tableName ? getTableColumns(tableName) : Promise.resolve([]);
-    })
+      const columns = columnResults[index] || [];
+      const geometryColumn = columns.find(isGeometryColumn) || null;
+
+      if (!tableName || !geometryColumn?.column_name) {
+        return Promise.resolve(null);
+      }
+
+      return getLayerCatalogSummary(
+        tableName,
+        geometryColumn.column_name,
+        columns
+      ).catch((error) => {
+        logBackendError(
+          `[GIS API] No se pudo obtener resumen del catálogo para "${GIS_SCHEMA}"."${tableName}"`,
+          error
+        );
+        return null;
+      });
+    }),
+    CATALOG_SUMMARY_CONCURRENCY,
+    (summaryTask) => summaryTask
   );
 
   // Combina cada tabla con sus columnas y detecta si tiene geometría
@@ -261,6 +474,7 @@ async function getLayerCatalog() {
     const columns = columnResults[index] || [];
     const geometryColumn = columns.find(isGeometryColumn) || null;
     const hasGeom = Boolean(geometryColumn);
+    const summary = catalogSummaries[index] || null;
 
     logBackend(
       `[GIS API] Tabla "${GIS_SCHEMA}"."${tableName}": geom=${hasGeom ? 'sí' : 'no'}`
@@ -273,6 +487,9 @@ async function getLayerCatalog() {
       has_geom: hasGeom,
       geometry_column: hasGeom ? geometryColumn.column_name : null,
       source_type: hasGeom ? 'postgis' : 'table',
+      estimated_count: hasGeom ? summary?.estimated_count || 0 : 0,
+      bbox: hasGeom ? summary?.bbox || null : null,
+      dg: summary?.dg || null,
     };
   }).filter((row) => row.name); // Elimina filas con nombre vacío
 
@@ -285,6 +502,19 @@ async function getLayerCatalog() {
   catalogCacheTime = Date.now();
 
   return catalog;
+}
+
+async function getTableMeta(tableName) {
+  const validCatalogCache = getValidCatalogCache();
+  if (validCatalogCache) {
+    return (
+      validCatalogCache.find(
+        (table) => String(table?.table_name || '').trim() === tableName
+      ) || null
+    );
+  }
+
+  return getTableMetaDirect(tableName);
 }
 
 // Obtiene los metadatos de UNA tabla específica consultando solo sus columnas.
@@ -371,6 +601,33 @@ async function getPostgisLayerGeoJson(tableName, geometryColumn) {
   };
 }
 
+async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
+  const cachedGeoJson = getCachedLayerGeoJson(tableName);
+  if (cachedGeoJson) {
+    return { geojson: cachedGeoJson, cacheStatus: 'hit' };
+  }
+
+  const sharedRequest = layerGeoJsonInFlight.get(tableName);
+  if (sharedRequest) {
+    return { geojson: await sharedRequest, cacheStatus: 'shared' };
+  }
+
+  const requestPromise = getPostgisLayerGeoJson(tableName, geometryColumn)
+    .then((geojson) => {
+      layerGeoJsonCache.set(tableName, {
+        geojson,
+        cachedAt: Date.now(),
+      });
+      return geojson;
+    })
+    .finally(() => {
+      layerGeoJsonInFlight.delete(tableName);
+    });
+
+  layerGeoJsonInFlight.set(tableName, requestPromise);
+  return { geojson: await requestPromise, cacheStatus: 'miss' };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RUTAS DE LA API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -420,7 +677,13 @@ app.get('/layers', async (req, res) => {
     const tables = catalog.map((table) => ({
       name: table.name,
       table_name: table.table_name,
+      table_schema: table.table_schema,
       has_geom: table.has_geom,
+      geometry_column: table.geometry_column,
+      source_type: table.source_type,
+      estimated_count: table.estimated_count,
+      bbox: table.bbox,
+      dg: table.dg,
     }));
 
     // Permite al navegador cachear este response hasta 60 segundos
@@ -457,7 +720,7 @@ app.get('/layer/:table', async (req, res) => {
   try {
     // Validación directa: consulta solo las columnas de ESTA tabla.
     // Mucho más rápido que getLayerCatalog() que escanea todo el schema.
-    const metadata = await getTableMetaDirect(tableName);
+    const metadata = await getTableMeta(tableName);
 
     if (!metadata) {
       res.status(404).json({
@@ -479,13 +742,14 @@ app.get('/layer/:table', async (req, res) => {
       return;
     }
 
-    const geojson = await getPostgisLayerGeoJson(
+    const { geojson, cacheStatus } = await getCachedPostgisLayerGeoJson(
       metadata.table_name,
       metadata.geometry_column
     );
 
     // Permite al navegador cachear el GeoJSON 2 minutos
     res.set('Cache-Control', 'public, max-age=120');
+    res.set('X-GIS-Cache', cacheStatus);
     res.json(geojson);
   } catch (error) {
     res.status(500).json({
@@ -525,6 +789,7 @@ app.post('/cache/invalidate', (req, res) => {
   }
 
   invalidateCatalogCache();
+  invalidateLayerGeoJsonCache();
   logBackend('[GIS API] Caché de catálogo invalidado manualmente');
   res.json({ ok: true, message: 'Caché de catálogo invalidado.' });
 });

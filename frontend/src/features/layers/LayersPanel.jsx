@@ -2,6 +2,7 @@ import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 import FiltersPanel from '../filters/FiltersPanel';
 import LayerStyleEditor from './LayerStyleEditor';
+import { formatLayerCount, getLayerStatus } from './layerStatus';
 
 const GEOJSON_GEOMETRY_TYPES = new Set([
   'Point',
@@ -65,6 +66,31 @@ function buildFeatureCollectionFromGeoJson(payload) {
   throw new Error('Solo se permiten archivos GeoJSON válidos.');
 }
 
+function buildMetricSummary(layer, metrics) {
+  const loadedCount = layer.data?.features?.length || 0;
+  const estimatedCount = Math.max(0, Number(layer.estimatedFeatureCount || 0));
+  const isPendingDatabaseLayer =
+    layer.databaseLayer && layer.loadStatus !== 'loaded';
+
+  return {
+    progress: isPendingDatabaseLayer
+      ? 'Pendiente'
+      : metrics.averageProgress != null
+        ? `${metrics.averageProgress}% avance`
+        : 'Sin avance',
+    risk: isPendingDatabaseLayer
+      ? 'Sin evaluar'
+      : metrics.riskCount > 0
+        ? `${metrics.riskCount} elemento${metrics.riskCount === 1 ? '' : 's'} en riesgo`
+        : 'Sin riesgo',
+    total: isPendingDatabaseLayer
+      ? estimatedCount > 0
+        ? `${formatLayerCount(estimatedCount, true)} elementos estimados`
+        : 'Disponible para cargar'
+      : `${formatLayerCount(loadedCount)} elemento${loadedCount === 1 ? '' : 's'}`,
+  };
+}
+
 function LayersPanel() {
   const {
     actions,
@@ -76,6 +102,7 @@ function LayersPanel() {
     layerSearchResults,
     layers,
     mapApi,
+    mapViewportBounds,
     selectedLayer,
     selectedLayerId,
     sidebarTab,
@@ -299,6 +326,24 @@ function LayersPanel() {
                     totalElements: 0,
                     health: 'active',
                   };
+                  const status = getLayerStatus(layer, mapViewportBounds, metrics);
+                  const metricSummary = buildMetricSummary(layer, metrics);
+                  const isMetricsLoaded =
+                    !layer.databaseLayer || layer.loadStatus === 'loaded';
+                  const statusIndicatorClass = isMetricsLoaded
+                    ? metrics.health === 'risk'
+                      ? ' is-risk'
+                      : ' is-active'
+                    : ' is-pending';
+                  const statusIndicatorLabel = isMetricsLoaded
+                    ? metrics.health === 'risk'
+                      ? 'Riesgo'
+                      : 'Activo'
+                    : status.label;
+                  const subtitleText =
+                    isMetricsLoaded
+                      ? `${layer.visible ? 'Visible' : 'Oculta'} · ${filteredFeatureCount} visibles · ${layer.geometryType}`
+                      : `${status.label} · ${status.detail} · ${layer.geometryType}`;
 
                     return (
                       <article
@@ -363,16 +408,15 @@ function LayersPanel() {
                                   <strong title={layer.name}>{layer.name}</strong>
                                   <span
                                     className={`layers-tree__status-indicator${
-                                      metrics.health === 'risk' ? ' is-risk' : ' is-active'
+                                      statusIndicatorClass
                                     }`}
                                   >
                                     <span className="layers-tree__status-dot" />
-                                    {metrics.health === 'risk' ? 'Riesgo' : 'Activo'}
+                                    {statusIndicatorLabel}
                                   </span>
                                 </span>
                                 <span className="layers-tree__subtitle">
-                                  {layer.visible ? 'Visible' : 'Oculta'} ·{' '}
-                                  {filteredFeatureCount} visibles · {layer.geometryType}
+                                  {subtitleText}
                                 </span>
                               </span>
                               <span className={`layers-tree__accordion${isExpanded ? ' is-open' : ''}`}>
@@ -400,26 +444,21 @@ function LayersPanel() {
                             <span className="layers-tree__meta-row">
                               <span className="layers-tree__meta-chip is-success">
                                 <span className="layers-tree__meta-dot" />
-                                {metrics.averageProgress != null
-                                  ? `${metrics.averageProgress}% avance`
-                                  : 'Sin avance'}
+                                {metricSummary.progress}
                               </span>
                               <span
                                 className={`layers-tree__meta-chip${
-                                  metrics.riskCount > 0 ? ' is-danger' : ' is-neutral'
+                                  isMetricsLoaded && metrics.riskCount > 0
+                                    ? ' is-danger'
+                                    : ' is-neutral'
                                 }`}
                               >
                                 <span className="layers-tree__meta-dot" />
-                                {metrics.riskCount > 0
-                                  ? `${metrics.riskCount} elemento${
-                                      metrics.riskCount === 1 ? '' : 's'
-                                    } en riesgo`
-                                  : 'Sin riesgo'}
+                                {metricSummary.risk}
                               </span>
                               <span className="layers-tree__meta-chip is-info">
                                 <span className="layers-tree__meta-dot" />
-                                {metrics.totalElements} elemento
-                                {metrics.totalElements === 1 ? '' : 's'}
+                                {metricSummary.total}
                               </span>
                             </span>
                           </div>
