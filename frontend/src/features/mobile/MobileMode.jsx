@@ -35,10 +35,21 @@ const SPLASH_DURATION_MS = 2200;
 function MobileMode() {
   const [onboardingDone, setOnboardingDone] = React.useState(!shouldShowOnboarding());
   const [showSplash, setShowSplash] = React.useState(true);
+  const [isLandscape, setIsLandscape] = React.useState(
+    () => window.innerWidth > window.innerHeight
+  );
 
   React.useEffect(() => {
     const timer = setTimeout(() => setShowSplash(false), SPLASH_DURATION_MS);
     return () => clearTimeout(timer);
+  }, []);
+
+  // Bloquear modo horizontal — el sistema no está optimizado para landscape
+  React.useEffect(() => {
+    const check = () => setIsLandscape(window.innerWidth > window.innerHeight);
+    window.addEventListener('resize', check);
+    check();
+    return () => window.removeEventListener('resize', check);
   }, []);
 
   const {
@@ -59,6 +70,19 @@ function MobileMode() {
   };
 
   const meta = SHEET_META[mobileSheet] || { title: '', subtitle: '' };
+
+  // Pantalla de bloqueo para modo horizontal
+  if (isLandscape) {
+    return (
+      <div className="mobile-landscape-lock">
+        <svg fill="none" height="48" viewBox="0 0 48 48" width="48" xmlns="http://www.w3.org/2000/svg">
+          <rect height="30" rx="4" stroke="currentColor" strokeWidth="2" width="46" x="1" y="9" />
+          <path d="M32 4v6M16 4v6M32 38v6M16 38v6" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+        </svg>
+        <p>Por favor usa el sistema en modo vertical</p>
+      </div>
+    );
+  }
 
   // BUG-03: invalidateSize ya es manejado por MapView con múltiples timers
   // (100 ms, 300 ms, 600 ms) que incluyen mobileSheet y isCompactViewport en sus deps.
@@ -88,13 +112,11 @@ function MobileMode() {
             <img
               alt=""
               className="mobile-splash__logo"
-              src={process.env.PUBLIC_URL + "/assets/img/sinfondo.png"}
+              src={process.env.PUBLIC_URL + "/assets/img/nuevologoSinfondo.png"}
             />
-            <span className="mobile-splash__subtitle">Visor de obra pública</span>
-            <div className="mobile-splash__dots">
-              <span className="mobile-splash__dot" />
-              <span className="mobile-splash__dot" />
-              <span className="mobile-splash__dot" />
+            <span className="mobile-splash__subtitle">Sistema de información Geográfica SOBSE</span>
+            <div className="mobile-splash__bar">
+              <div className="mobile-splash__bar-fill" />
             </div>
           </div>
         )}

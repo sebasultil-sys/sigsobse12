@@ -42,8 +42,10 @@ const UPLOAD_COLORS = [
 // Cada cuánto tiempo (ms) reconsultamos el catálogo de capas de la base de datos.
 // En desarrollo usamos 30 s para ver cambios rápido; en producción 5 min
 // para no descargar GeoJSON pesados innecesariamente en cada sesión.
+// En producción: 5 min. En desarrollo: 90 s (era 30 s, causaba rebuilds de Effect 1
+// cada 30 s aunque los datos no cambiaran — visible como parpadeo en el mapa).
 const DEFAULT_DATABASE_SYNC_INTERVAL_MS =
-  process.env.NODE_ENV === 'production' ? 5 * 60 * 1000 : 30000;
+  process.env.NODE_ENV === 'production' ? 5 * 60 * 1000 : 90 * 1000;
 const DATABASE_SYNC_INTERVAL_MS = Math.max(
   15000,
   Number(process.env.REACT_APP_GIS_SYNC_INTERVAL_MS || DEFAULT_DATABASE_SYNC_INTERVAL_MS)

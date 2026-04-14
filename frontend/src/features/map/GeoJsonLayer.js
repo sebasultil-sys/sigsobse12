@@ -64,6 +64,96 @@ function buildPopupMarkup(feature, layerName) {
   `;
 }
 
+// ── Iconos de status por feature ─────────────────────────────────────────────
+
+// Colores por estado de avance/status de la obra.
+// Se usan como borde del círculo blanco (estilo "pin institucional").
+const STATUS_COLORS = {
+  entregado:     '#4FC3F7', // azul claro — obra entregada
+  proceso:       '#FF9800', // naranja — en proceso
+  terminado:     '#4CAF50', // verde — terminada/concluida
+  'sin iniciar': '#F44336', // rojo — sin iniciar
+};
+
+const STATUS_ICON_KEYS = [
+  'F_ESTATUS', 'ESTATUS', 'estatus', 'ESTADO', 'estado',
+  'STATUS', 'status',
+];
+
+// Normaliza un valor de status a una clave de STATUS_COLORS.
+// Retorna null si no hay coincidencia reconocida.
+function resolveStatusKey(rawValue) {
+  if (!rawValue) return null;
+  const v = String(rawValue)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (v.includes('entregad')) return 'entregado';
+  if (v.includes('terminad') || v.includes('concluid') || v.includes('finaliz')) return 'terminado';
+  if (v.includes('proceso') || v.includes('ejecuci') || v.includes('avance')) return 'proceso';
+  if (v.includes('sin iniciar') || v.includes('no inici')) return 'sin iniciar';
+  return null;
+}
+
+// Obtiene el color de borde del pin a partir de las propiedades del feature.
+// Retorna null si el feature no tiene un campo de status reconocido.
+export function getFeatureStatusColor(properties) {
+  for (const key of STATUS_ICON_KEYS) {
+    const raw = properties?.[key];
+    if (raw == null || raw === '') continue;
+    const statusKey = resolveStatusKey(raw);
+    if (statusKey) return STATUS_COLORS[statusKey];
+  }
+  return null;
+}
+
+// Caché de L.divIcon por clave de status — evita recrear el mismo icono en cada feature.
+// Solo almacena el estado 'default'; Effect 2 reconstruye el icono para selected/highlighted.
+const iconCache = {};
+
+// Genera el HTML de un "pin" circular institucional:
+//   - fondo blanco, borde del color del status
+//   - punto de relleno interior del MISMO color (estilo story map)
+//   - wrapper con class=lmap-status-wrap y data-vs para que Effect 2 actualice el estado
+export function buildStatusIconHtml(borderColor, visualState) {
+  const isSelected    = visualState === 'selected';
+  const isHighlighted = visualState === 'highlighted';
+  const size      = isSelected ? 34 : isHighlighted ? 30 : 28;
+  const border    = isSelected ? 5 : 4;
+  const fillSize  = isSelected ? 14 : isHighlighted ? 12 : 10;
+  const shadow = isSelected
+    ? `0 0 0 3px #691C32,0 2px 8px rgba(0,0,0,0.35)`
+    : isHighlighted
+      ? `0 0 0 2px #C5A572,0 2px 6px rgba(0,0,0,0.28)`
+      : `0 2px 6px rgba(0,0,0,0.28)`;
+  return (
+    `<div class="lmap-status-wrap" data-vs="${visualState}" data-color="${borderColor}" style="` +
+    `width:${size}px;height:${size}px;border-radius:50%;` +
+    `border:${border}px solid ${borderColor};background:#fff;` +
+    `box-shadow:${shadow};` +
+    `display:flex;align-items:center;justify-content:center;">` +
+    `<div style="width:${fillSize}px;height:${fillSize}px;border-radius:50%;background:${borderColor};opacity:0.85;"></div>` +
+    `</div>`
+  );
+}
+
+// Devuelve un L.divIcon cacheado para el status dado (estado 'default').
+// Usar solo en pointToLayer; Effect 2 llama buildStatusIconHtml directamente.
+export function getStatusIcon(statusRaw) {
+  const statusKey = resolveStatusKey(statusRaw) || 'sin iniciar';
+  if (iconCache[statusKey]) return iconCache[statusKey];
+  const color = STATUS_COLORS[statusKey] || '#9E9E9E';
+  const html = buildStatusIconHtml(color, 'default');
+  const icon = L.divIcon({
+    className: '',
+    html,
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+  iconCache[statusKey] = icon;
+  return icon;
+}
+
 // ── Estilos de línea ──────────────────────────────────────────────────────────
 
 // Convierte el nombre del estilo de línea en el patrón CSS dashArray de SVG.
@@ -237,7 +327,7 @@ export function getVisualState({
   if (!isLayerVisible) return 'hidden';
   if (isSelectedFeature) return 'selected';
   if (isLayerHovered || isLayerFocused) return 'highlighted';
-  if (isFocusMode) return 'dimmed';
+  // No dimmear otras capas — múltiples capas deben permanecer visibles
   return 'default';
 }
 
@@ -323,7 +413,7 @@ export function createGeoJsonLayer({
 
       const iconUrl = getLayerIcon(layer.name);
       if (iconUrl) {
-        // Icono personalizado: L.divIcon con atributo data-vs para estados CSS
+        // Icono personalizado PNG: L.divIcon con atributo data-vs para estados CSS
         const divIcon = L.divIcon({
           className: '',  // sin clase extra de Leaflet — manejamos todo con nuestro CSS
           html: `<div class="lmap-icon-wrap" data-vs="${visualState}"><img class="lmap-icon" src="${iconUrl}" alt="" draggable="false" /></div>`,
@@ -334,7 +424,39 @@ export function createGeoJsonLayer({
         return L.marker(latlng, { icon: divIcon, interactive: true });
       }
 
-      // Sin icono personalizado: CircleMarker con estilo dinámico (comportamiento original)
+      // Icono de status: círculo blanco + relleno interior del color según ESTATUS del feature
+      // Solo se aplica si el feature tiene un campo de status reconocido.
+      const statusColor = getFeatureStatusColor(feature?.properties || {});
+      if (statusColor && visualState !== 'hidden') {
+        let statusIcon;
+        if (visualState === 'default') {
+          // Estado normal: usar icono cacheado para este status
+          const statusRaw = (() => {
+            const props = feature?.properties || {};
+            for (const key of STATUS_ICON_KEYS) {
+              if (props[key] != null && props[key] !== '') return props[key];
+            }
+            return null;
+          })();
+          statusIcon = getStatusIcon(statusRaw);
+        } else {
+          // Estado interactivo: reconstruir con color y tamaño ajustados
+          const effectiveColor = visualState === 'selected' ? '#691C32'
+            : visualState === 'highlighted' ? '#C5A572'
+            : statusColor;
+          const iconSize = visualState === 'selected' ? 34 : visualState === 'highlighted' ? 30 : 28;
+          statusIcon = L.divIcon({
+            className: '',
+            html: buildStatusIconHtml(effectiveColor, visualState),
+            iconSize: [iconSize, iconSize],
+            iconAnchor: [iconSize / 2, iconSize / 2],
+            popupAnchor: [0, -(iconSize / 2) - 2],
+          });
+        }
+        return L.marker(latlng, { icon: statusIcon, interactive: true });
+      }
+
+      // Sin icono ni status: CircleMarker con estilo dinámico (comportamiento original)
       const style = createPointStyle(layer, visualState);
       return L.circleMarker(latlng, style);
     },

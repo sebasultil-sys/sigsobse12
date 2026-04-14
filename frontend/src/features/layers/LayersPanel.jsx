@@ -142,11 +142,15 @@ function LayersPanel() {
   const groupedLayerSearchResults = React.useMemo(() => {
     const groups = new Map();
 
-    layerSearchResults.forEach((layer) => {
-      const dg = getLayerGroupKey(layer.dg);
-      if (!groups.has(dg)) groups.set(dg, []);
-      groups.get(dg).push(layer);
-    });
+    layerSearchResults
+      // Ocultar capas de referencia del panel (ej. Límite CDMX).
+      // Siguen visibles en el mapa — solo se esconden del listado de capas.
+      .filter((layer) => !layer.referenceLayer && !layer.isBaseMap)
+      .forEach((layer) => {
+        const dg = getLayerGroupKey(layer.dg);
+        if (!groups.has(dg)) groups.set(dg, []);
+        groups.get(dg).push(layer);
+      });
 
     return orderLayerGroupEntries(Array.from(groups.entries()));
   }, [layerSearchResults]);

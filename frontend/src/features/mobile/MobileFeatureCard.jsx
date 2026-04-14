@@ -301,13 +301,6 @@ function resolveGoogleMapsField(properties, coords) {
   };
 }
 
-function getProgressTone(value) {
-  if (!Number.isFinite(value)) return 'neutral';
-  if (value >= 80) return 'good';
-  if (value >= 50) return 'warn';
-  return 'risk';
-}
-
 function getStatusTone({ diferencia, estatus, isRisk }) {
   if (isRisk) return 'risk';
   if (Number.isFinite(diferencia) && diferencia < 0) return 'warn';
@@ -330,29 +323,32 @@ function ProgressBar({ value }) {
   if (!Number.isFinite(value)) return null;
 
   const pct = Math.min(100, Math.max(0, value));
-  const tone = getProgressTone(value);
 
   return (
-    <div className="progress-container">
-      <div className="progress-meta">
-        <span>Avance real</span>
+    <div className="avance-box">
+      <div className="avance-box__header">
+        <span>Avance</span>
         <strong>{formatPercent(value)}</strong>
       </div>
-      <div className="progress-bar">
+      <div className="avance-box__barra">
         <div
-          className={`progress-fill progress-fill--${tone}`}
+          className="avance-box__fill"
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="progress-text">{formatPercent(value)}</span>
     </div>
   );
 }
 
 function MobileFeatureCard() {
   const { actions, selectedFeature } = useGISWorkspace();
-  const [isOpen, setIsOpen] = React.useState(true);
   const [shareToast, setShareToast] = React.useState(false);
+  const panelRef = React.useRef(null);
+
+  // Ref estable para acceder a actions dentro de efectos sin stale closure
+  const actionsRef = React.useRef(actions);
+  React.useEffect(() => { actionsRef.current = actions; });
+
   const properties = React.useMemo(
     () => selectedFeature?.properties || null,
     [selectedFeature]
@@ -363,15 +359,10 @@ function MobileFeatureCard() {
   // SEC-01: validar tableroLink antes de usarlo como href
   const safeTableroLink = isSafeUrl(tableroLink) ? tableroLink : null;
 
-  React.useEffect(() => {
-    if (selectedFeature) {
-      setIsOpen(true);
-    }
-  }, [selectedFeature]);
-
+  // Cerrar el panel completamente cuando se hace tap en el mapa fuera de él
   React.useEffect(() => {
     const handlePanelDismiss = () => {
-      setIsOpen(false);
+      actionsRef.current.clearSelectionAndTools();
     };
 
     window.addEventListener('gis-detail-panel-dismiss', handlePanelDismiss);
@@ -389,38 +380,6 @@ function MobileFeatureCard() {
   }, [safeProperties, selectedFeature, tableroLink]);
 
   if (!selectedFeature) return null;
-
-  // BUG-02: Mini-chip cuando la ficha está minimizada — permite reabrir sin clic en el mapa
-  if (!isOpen) {
-    const miniTitle =
-      formatFieldValue(firstPropertyEntry(safeProperties, TITLE_KEYS)?.value) ||
-      formatFieldValue(selectedFeature.layerName) ||
-      'Obra seleccionada';
-
-    return (
-      <div className="mfc-mini">
-        <span className="mfc-mini__title">{miniTitle}</span>
-        <button
-          aria-label="Ver ficha de la obra"
-          className="mfc-mini__btn"
-          onClick={() => setIsOpen(true)}
-          type="button"
-        >
-          Ver ficha
-        </button>
-        <button
-          aria-label="Cerrar selección"
-          className="mfc-mini__close"
-          onClick={() => actions.setSelectedFeature(null)}
-          type="button"
-        >
-          <svg fill="none" height="14" viewBox="0 0 14 14" width="14" xmlns="http://www.w3.org/2000/svg">
-            <path d="M11 3 3 11M3 3l8 8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
-          </svg>
-        </button>
-      </div>
-    );
-  }
 
   const title =
     formatFieldValue(firstPropertyEntry(safeProperties, TITLE_KEYS)?.value) ||
@@ -476,11 +435,28 @@ function MobileFeatureCard() {
   };
 
   return (
-    <div className="mfc">
+    <div className="mfc" ref={panelRef}>
       <div className="mfc__inner">
         <div className="panel-header">
           <h3 className="panel-title">Detalle de obra</h3>
           <div className="panel-header__actions">
+            {safeTableroLink ? (
+              <a
+                className="tablero-btn tablero-btn--header"
+                href={safeTableroLink}
+                rel="noopener noreferrer"
+                target="_blank"
+                title="Ver tablero de control"
+              >
+                <svg fill="none" height="15" viewBox="0 0 24 24" width="15" xmlns="http://www.w3.org/2000/svg">
+                  <rect height="7" rx="1" stroke="currentColor" strokeWidth="1.8" width="7" x="3" y="3" />
+                  <rect height="7" rx="1" stroke="currentColor" strokeWidth="1.8" width="7" x="14" y="3" />
+                  <rect height="7" rx="1" stroke="currentColor" strokeWidth="1.8" width="7" x="14" y="14" />
+                  <rect height="7" rx="1" stroke="currentColor" strokeWidth="1.8" width="7" x="3" y="14" />
+                </svg>
+                Tablero
+              </a>
+            ) : null}
             <button
               aria-label="Compartir obra"
               className="icon-btn"
@@ -496,14 +472,14 @@ function MobileFeatureCard() {
               </svg>
             </button>
             <button
-              aria-label="Minimizar detalle"
+              aria-label="Cerrar detalle"
               className="icon-btn"
-              onClick={() => setIsOpen(false)}
-              title="Minimizar"
+              onClick={() => actions.clearSelectionAndTools()}
+              title="Cerrar"
               type="button"
             >
               <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
-                <path d="M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
               </svg>
             </button>
           </div>
@@ -513,16 +489,6 @@ function MobileFeatureCard() {
             Información copiada al portapapeles
           </div>
         )}
-        {safeTableroLink ? (
-          <a
-            className="tablero-btn"
-            href={safeTableroLink}
-            rel="noopener noreferrer"
-            target="_blank"
-          >
-            📊 Ver tablero
-          </a>
-        ) : null}
         <div className="mfc__eyebrow obra-subtitle">{layerLabel}</div>
         <h4 className="mfc__title obra-title">{title}</h4>
         <div className={`mfc__status-line mfc__status-line--${statusTone}`}>

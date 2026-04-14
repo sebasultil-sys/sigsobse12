@@ -72,11 +72,15 @@ function MobileLayersPanel() {
 
   const groups = React.useMemo(() => {
     const map = new Map();
-    layers.forEach((layer) => {
-      const dg = layer.dg || 'Sin DG';
-      if (!map.has(dg)) map.set(dg, []);
-      map.get(dg).push(layer);
-    });
+    // Ocultar capas de referencia (ej. Límite CDMX) del panel móvil.
+    // Siguen visibles en el mapa — solo se esconden del listado.
+    layers
+      .filter((layer) => !layer.referenceLayer && !layer.isBaseMap)
+      .forEach((layer) => {
+        const dg = layer.dg || 'Sin DG';
+        if (!map.has(dg)) map.set(dg, []);
+        map.get(dg).push(layer);
+      });
     return orderLayerGroupEntries([...map.entries()]);
   }, [layers]);
 
@@ -116,8 +120,6 @@ function MobileLayersPanel() {
       <div className="lp-header">
         <div className="lp-stats lp-stats--rich">
           <span><strong>{visibleLayerCount}</strong> activas</span>
-          <span><strong>{summary.loaded}</strong> cargadas</span>
-          <span><strong>{summary.loading}</strong> cargando</span>
           <span><strong>{layers.length}</strong> total</span>
         </div>
         <div className="lp-actions">
@@ -176,7 +178,6 @@ function MobileLayersPanel() {
                 <div className="lp-group__body">
                   {dgLayers.map((layer) => {
                     const metrics = layerMetricsById.get(layer.id) || {};
-                    const status = layerStatusById.get(layer.id);
                     const isRisk = (metrics.riskCount || 0) > 0;
                     const displayName = getLayerDisplayName(layer);
 
@@ -187,12 +188,7 @@ function MobileLayersPanel() {
                       >
                         <div className="lp-layer__main">
                           <LayerIcon layer={layer} />
-                          <div className="lp-layer__info">
-                            <strong title={displayName}>{displayName}</strong>
-                            <div className="lp-layer__meta">
-                              <span>{status?.detail}</span>
-                            </div>
-                          </div>
+                          <span className="lp-layer__name" title={displayName}>{displayName}</span>
                           <LayerToggle
                             checked={layer.visible}
                             label={`${layer.visible ? 'Apagar' : 'Encender'} ${displayName}`}

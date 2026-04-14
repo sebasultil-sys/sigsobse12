@@ -9,7 +9,12 @@ import {
   resolveLayerForHotspot,
   resolveLayerForProximity,
 } from './advancedTools';
-import { createGeoJsonLayer, getVisualState } from './GeoJsonLayer';
+import {
+  buildStatusIconHtml,
+  createGeoJsonLayer,
+  getFeatureStatusColor,
+  getVisualState,
+} from './GeoJsonLayer';
 import { fitVisibleLayers } from './FitVisibleLayers';
 import { getLayerStatus } from '../layers/layerStatus';
 
@@ -173,15 +178,30 @@ function safeInvalidate(mapRef, delay = 250) {
   }, delay);
 }
 
+// Firma estable de las capas visibles — usada como dep de Effect 1.
+// Captura los campos que realmente requieren re-crear el layer Leaflet:
+//   id, conteo de features, visibilidad, y todos los campos de estilo que
+//   createVectorStyle / createPointStyle leen del objeto layer.
+// PROPÓSITO: si el sync periódico de BD (cada 90 s) crea nuevos objetos JS
+//   pero los datos no cambiaron, la firma es la misma → Effect 1 NO se dispara
+//   → cero rebuilds innecesarios → cero parpadeos en el mapa.
 function buildVisibleSignature(layers) {
   return layers
     .filter((layer) => layer.visible)
-    .map(
-      (layer) =>
-        `${layer.id}:${layer.data?.features?.length || 0}:${layer.visible}:${
-          layer.style?.color || layer.color
-        }:${layer.style?.opacity || 0}`
-    )
+    .map((layer) => {
+      const s = layer.style || {};
+      return [
+        layer.id,
+        layer.data?.features?.length || 0,
+        s.color || layer.color,
+        s.weight || 2,
+        s.opacity || 0.94,
+        s.fillOpacity || 0.18,
+        s.pointRadius || 6,
+        s.markerKind || 'solid',
+        s.dashStyle || 'solid',
+      ].join(':');
+    })
     .join('|');
 }
 
@@ -734,6 +754,7 @@ function MapView({ mode = 'desktop' }) {
           zoom: DEFAULT_ZOOM,
           zoomControl: false,
           doubleClickZoom: true,
+          preferCanvas: true,
         });
       } catch (error) {
         console.error('[MapView] map init failed', error);
@@ -759,6 +780,7 @@ function MapView({ mode = 'desktop' }) {
         scheduleRefresh();
       });
 
+      let syncDebounceId = null;
       const syncMapMeta = () => {
         const center = map.getCenter();
         const bounds = map.getBounds();
@@ -766,12 +788,17 @@ function MapView({ mode = 'desktop' }) {
           zoom: map.getZoom(),
           center: { lat: center.lat, lng: center.lng },
         });
-        actionsRef.current.setMapViewportBounds({
-          west: bounds.getWest(),
-          south: bounds.getSouth(),
-          east: bounds.getEast(),
-          north: bounds.getNorth(),
-        });
+        // Debounce el update de viewport bounds para no disparar carga de capas
+        // en cada frame del pan — espera 300ms tras el último evento.
+        window.clearTimeout(syncDebounceId);
+        syncDebounceId = window.setTimeout(() => {
+          actionsRef.current.setMapViewportBounds({
+            west: bounds.getWest(),
+            south: bounds.getSouth(),
+            east: bounds.getEast(),
+            north: bounds.getNorth(),
+          });
+        }, 300);
       };
 
       syncMapMeta();
@@ -852,6 +879,7 @@ function MapView({ mode = 'desktop' }) {
 
       initializeMap.cleanup = () => {
         map.off('moveend zoomend', syncMapMeta);
+        window.clearTimeout(syncDebounceId);
       };
     };
 
@@ -891,8 +919,9 @@ function MapView({ mode = 'desktop' }) {
 
     const baseLayer = L.tileLayer(activeBaseMap.url, {
       attribution: activeBaseMap.attribution,
-      keepBuffer: 2,
-      updateWhenIdle: true,
+      keepBuffer: 4,           // pre-carga más tiles alrededor — panning más suave
+      updateWhenIdle: true,    // actualiza tiles solo cuando el mapa está quieto
+      updateWhenZooming: false, // NO cargar tiles durante animación de zoom
     });
     const refresh = () => refreshMapLayout(map);
     const handleLoad = () => {
@@ -921,22 +950,32 @@ function MapView({ mode = 'desktop' }) {
   }, [activeBaseMap, mapReadyVersion]);
 
   // ── Effect 1: Layer CREATION ─────────────────────────────────────────────
-  // Runs only when layer data / visibility / style / interactivity changes.
-  // Does NOT include hoveredLayerId / activeFocusLayerId / selectedFeature
-  // because those are volatile interaction state that should never cause full
-  // layer teardown — they are handled by Effect 2 (style-only update below).
+  // Dep: visibleSignature (firma estable de capas visibles) en vez de
+  //   filteredLayers directamente.
+  //
+  // MOTIVACIÓN: filteredLayers puede cambiar de referencia sin que los datos
+  //   reales cambien (ej. sync periódico de BD crea nuevos objetos JS pero
+  //   mismos datos). Si usáramos filteredLayers como dep, Effect 1 re-crearía
+  //   TODAS las capas Leaflet cada 90 s — causa parpadeo visible.
+  //
+  // Con visibleSignature: solo se dispara si cambia visibilidad, datos, o estilo.
+  //   El cuerpo usa filteredLayersRef.current (actualizado por el efecto anterior
+  //   en orden de declaración) para leer los datos frescos sin cerrar sobre ellos.
   React.useEffect(() => {
     const overlayGroup = overlayGroupRef.current;
     if (!overlayGroup) return;
+
+    // Lee los datos frescos desde el ref (siempre actualizado antes de este effect)
+    const currentFilteredLayers = filteredLayersRef.current;
 
     overlayGroup.clearLayers();
     overlayLayersRef.current.clear();
 
     if (process.env.NODE_ENV !== 'production') {
-      const visibleWithData = filteredLayers.filter((l) => l.visible && l.data?.features?.length);
-      const visibleNoData   = filteredLayers.filter((l) => l.visible && !(l.data?.features?.length));
+      const visibleWithData = currentFilteredLayers.filter((l) => l.visible && l.data?.features?.length);
+      const visibleNoData   = currentFilteredLayers.filter((l) => l.visible && !(l.data?.features?.length));
       console.log(
-        `[MapView] Effect 1 — total filteredLayers: ${filteredLayers.length}`,
+        `[MapView] Effect 1 — total filteredLayers: ${currentFilteredLayers.length}`,
         `| renderizando: ${visibleWithData.length}`,
         `| visible sin datos: ${visibleNoData.length}`,
       );
@@ -948,7 +987,7 @@ function MapView({ mode = 'desktop' }) {
       );
     }
 
-    filteredLayers
+    currentFilteredLayers
       .filter((layer) => layer.visible && layer.data?.features?.length)
       .forEach((layer) => {
         // Las capas de transporte (Cablebús, Tren Ligero, Trolebús) tienen geometría
@@ -978,7 +1017,7 @@ function MapView({ mode = 'desktop' }) {
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    filteredLayers,
+    visibleSignature,  // firma estable — no cambia por sync de BD sin datos nuevos
     interactionMode,
     mapReadyVersion,
     activeTool,
@@ -1023,9 +1062,7 @@ function MapView({ mode = 'desktop' }) {
           );
         }
 
-        // ── L.Marker con divIcon (iconos personalizados PNG) ───────────────
-        // El estado visual se gestiona via data-vs en el elemento .lmap-icon-wrap.
-        // CSS aplica filtros (brillo, opacidad, sombra) según el valor de data-vs.
+        // ── L.Marker con divIcon (iconos personalizados PNG o status) ────────
         if (sublayer instanceof L.Marker) {
           const featureKey =
             sublayer.feature?.properties?.__featureKey || null;
@@ -1037,8 +1074,38 @@ function MapView({ mode = 'desktop' }) {
             selectedFeatureKey,
             featureKey,
           });
-          const iconWrap = sublayer.getElement?.()?.querySelector('.lmap-icon-wrap');
-          if (iconWrap) iconWrap.dataset.vs = visualState;
+          const element = sublayer.getElement?.();
+
+          // Icono PNG: actualiza data-vs → CSS aplica filtros de brillo/opacidad
+          const iconWrap = element?.querySelector('.lmap-icon-wrap');
+          if (iconWrap) {
+            iconWrap.dataset.vs = visualState;
+          }
+
+          // Icono de status (círculo blanco + borde de color):
+          // Reconstruye el icon con el nuevo visual state para cambiar tamaño y sombra.
+          const statusWrap = element?.querySelector('.lmap-status-wrap');
+          if (statusWrap) {
+            const props = sublayer.feature?.properties || {};
+            const baseStatusColor = getFeatureStatusColor(props);
+            if (baseStatusColor) {
+              const effectiveColor = visualState === 'selected'
+                ? '#691C32'
+                : visualState === 'highlighted'
+                  ? '#C5A572'
+                  : baseStatusColor;
+              const iconSize = visualState === 'selected' ? 34 : visualState === 'highlighted' ? 30 : 28;
+              sublayer.setIcon(
+                L.divIcon({
+                  className: 'status-marker',
+                  html: buildStatusIconHtml(effectiveColor, visualState),
+                  iconSize: [iconSize, iconSize],
+                  iconAnchor: [iconSize / 2, iconSize / 2],
+                  popupAnchor: [0, -(iconSize / 2) - 2],
+                })
+              );
+            }
+          }
         }
       });
     });
@@ -2033,35 +2100,88 @@ function MapView({ mode = 'desktop' }) {
         ) : null}
 
         {selectedFeature && !isMobile && isDesktopFeatureCardOpen ? (
-          <div className="map-view__feature-card">
-            <div className="panel-header">
-              <span className="map-view__feature-eyebrow">Elemento activo</span>
-              <button
-                aria-label="Minimizar detalle"
-                className="minimize-btn"
-                onClick={() => setIsDesktopFeatureCardOpen(false)}
-                type="button"
-              >
-                −
-              </button>
-            </div>
-            <h3>{selectedFeature.properties?.OBRA || selectedFeature.layerName}</h3>
-            <dl>
-              {[
-                ['Programa', selectedFeature.properties?.PROGRAMA],
-                ['DG', selectedFeature.properties?.DG],
-                ['Alcaldía', selectedFeature.properties?.ALCALDIA],
-                ['Frente', selectedFeature.properties?.FRENTE],
-              ]
-                .filter(([, value]) => value)
-                .map(([label, value]) => (
-                  <div key={label}>
-                    <dt>{label}</dt>
-                    <dd>{String(value)}</dd>
+          (() => {
+            const fp = selectedFeature.properties || {};
+            // Avance real (busca varios nombres de campo posibles)
+            const avanceRaw = fp.F_AV_REAL ?? fp.AV_REAL ?? fp.AVANCE_REAL ?? fp.AVANCE ?? fp.PORC_AVANCE ?? null;
+            const avance = avanceRaw != null ? Math.min(100, Math.max(0, Number(avanceRaw))) : null;
+            const avancePct = Number.isFinite(avance) ? avance : null;
+            // Status
+            const estatus = fp.F_ESTATUS ?? fp.ESTATUS ?? fp.estatus ?? fp.ESTADO ?? fp.estado ?? null;
+            // Tablero de control
+            const tableroRaw = fp.tablero_control ?? fp.TABLERO_CONTROL ?? fp.F_TABLERO ?? fp.TABLERO ?? null;
+            const isSafeTablero = tableroRaw && (() => { try { const u = new URL(String(tableroRaw).trim()); return u.protocol === 'https:' || u.protocol === 'http:'; } catch { return false; } })();
+            return (
+              <div className="map-view__feature-card">
+                <div className="panel-header">
+                  <span className="map-view__feature-eyebrow">Elemento activo</span>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    {isSafeTablero && (
+                      <a
+                        className="tablero-btn tablero-btn--header"
+                        href={String(tableroRaw).trim()}
+                        rel="noopener noreferrer"
+                        target="_blank"
+                        title="Ver tablero de control"
+                      >
+                        Ver tablero
+                      </a>
+                    )}
+                    <button
+                      aria-label="Minimizar detalle"
+                      className="minimize-btn"
+                      onClick={() => setIsDesktopFeatureCardOpen(false)}
+                      type="button"
+                    >
+                      −
+                    </button>
                   </div>
-                ))}
-            </dl>
-          </div>
+                </div>
+                <h3 style={{ margin: '0 0 10px', fontSize: 14, fontWeight: 700 }}>
+                  {fp.OBRA || fp.NOMBRE_OBRA || fp.PLANTEL || selectedFeature.layerName}
+                </h3>
+                {/* Barra de avance */}
+                {avancePct != null && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4, color: '#61707f' }}>
+                      <span>Avance real</span>
+                      <strong style={{ color: '#17212b' }}>{avancePct}%</strong>
+                    </div>
+                    <div style={{ height: 6, background: '#eee', borderRadius: 4, overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        width: `${avancePct}%`,
+                        background: avancePct >= 80 ? '#4CAF50' : avancePct >= 50 ? '#FF9800' : '#691C32',
+                        borderRadius: 4,
+                        transition: 'width 0.3s ease',
+                      }} />
+                    </div>
+                  </div>
+                )}
+                {/* Estatus */}
+                {estatus && (
+                  <div style={{ fontSize: 12, marginBottom: 8, color: '#61707f' }}>
+                    Estatus: <strong style={{ color: '#17212b' }}>{String(estatus)}</strong>
+                  </div>
+                )}
+                <dl>
+                  {[
+                    ['Programa', fp.PROGRAMA],
+                    ['DG', fp.DG],
+                    ['Alcaldía', fp.ALCALDIA],
+                    ['Frente', fp.FRENTE],
+                  ]
+                    .filter(([, value]) => value)
+                    .map(([label, value]) => (
+                      <div key={label}>
+                        <dt>{label}</dt>
+                        <dd>{String(value)}</dd>
+                      </div>
+                    ))}
+                </dl>
+              </div>
+            );
+          })()
         ) : null}
 
         {!isMobile ? (
