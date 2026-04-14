@@ -30,13 +30,20 @@ function SearchIcon() {
   );
 }
 
+const SPLASH_DURATION_MS = 2200;
+
 function MobileMode() {
   const [onboardingDone, setOnboardingDone] = React.useState(!shouldShowOnboarding());
+  const [showSplash, setShowSplash] = React.useState(true);
+
+  React.useEffect(() => {
+    const timer = setTimeout(() => setShowSplash(false), SPLASH_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   const {
     actions,
     isCompactViewport,
-    mapApi,
     mobileModeManual,
     mobileSheet,
     selectedFeature,
@@ -53,15 +60,10 @@ function MobileMode() {
 
   const meta = SHEET_META[mobileSheet] || { title: '', subtitle: '' };
 
-  React.useEffect(() => {
-    if (!mapApi?.invalidateSize) return undefined;
-
-    const timerId = window.setTimeout(() => {
-      mapApi.invalidateSize();
-    }, 300);
-
-    return () => window.clearTimeout(timerId);
-  }, [isCompactViewport, mapApi, mobileSheet]);
+  // BUG-03: invalidateSize ya es manejado por MapView con múltiples timers
+  // (100 ms, 300 ms, 600 ms) que incluyen mobileSheet y isCompactViewport en sus deps.
+  // El effect adicional aquí causaba 4+ llamadas simultáneas al abrir un panel.
+  // Se eliminó el effect redundante; MapView es la única fuente de verdad.
 
   let panelContent = null;
   if (mobileSheet === 'layers')    panelContent = <MobileLayersPanel />;
@@ -80,6 +82,24 @@ function MobileMode() {
       {!isCompactViewport && <div className="mobile-mode__backdrop" />}
 
       <section className="mobile-mode__device">
+        {/* SPLASH — solo en primer montaje */}
+        {showSplash && (
+          <div className="mobile-splash" aria-hidden="true">
+            <img
+              alt=""
+              className="mobile-splash__logo"
+              src="/files/web/assets/img/corazon-snfondo.png"
+            />
+            <span className="mobile-splash__title">SIG SOBSE</span>
+            <span className="mobile-splash__subtitle">Visor de obra pública</span>
+            <div className="mobile-splash__dots">
+              <span className="mobile-splash__dot" />
+              <span className="mobile-splash__dot" />
+              <span className="mobile-splash__dot" />
+            </div>
+          </div>
+        )}
+
         {/* MAP — full screen, behind everything */}
         <div className="mobile-mode__map-shell">
           <MapView mode="mobile" />
@@ -88,6 +108,12 @@ function MobileMode() {
         {/* TOP BAR — Google Maps style */}
         <header className="mtopbar">
           <div className="mtopbar__brand">
+            <img
+              alt="Logo SOBSE"
+              className="mtopbar__logo"
+              onError={(e) => { e.currentTarget.style.display = 'none'; }}
+              src="/files/web/assets/img/corazon-snfondo.png"
+            />
             <span>SIG</span>
             <strong>SOBSE</strong>
           </div>

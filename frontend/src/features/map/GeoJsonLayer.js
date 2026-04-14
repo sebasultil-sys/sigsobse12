@@ -16,6 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import L from 'leaflet';
+import { getLayerIcon } from '../../config/layerIcons';
 
 // ── Seguridad de HTML en popups ───────────────────────────────────────────────
 
@@ -258,6 +259,11 @@ export function getVisualState({
  *   Definición completa de la capa: id, data (GeoJSON), style, color, visible…
  * @param {Function} params.onSelectFeature
  *   Callback que el componente padre llama cuando el usuario hace clic en un feature.
+ * @param {boolean}  params.forcePointStyle
+ *   Si es true, usa createPointStyle en lugar de createVectorStyle para todos los
+ *   features (incluyendo los que se renderizaron como CircleMarker via pointToLayer).
+ *   Necesario cuando las geometrías originales (líneas) fueron convertidas a puntos
+ *   antes de pasar a esta función, para que Effect 2 (resetStyle) aplique el estilo correcto.
  */
 export function createGeoJsonLayer({
   enablePopup = true,
@@ -265,43 +271,70 @@ export function createGeoJsonLayer({
   interactive,
   layer,
   onSelectFeature,
+  forcePointStyle = false,
 }) {
+  // Función auxiliar interna que resuelve el estilo según el flag forcePointStyle.
+  // Se usa en el callback style() y en el handler mouseover para consistencia.
+  function resolveStyle(feature) {
+    const { focusedLayerId, hoveredLayerId, selectedFeatureKey } =
+      stateRef.current;
+    const visualState = getVisualState({
+      focusedLayerId,
+      hoveredLayerId,
+      isLayerVisible: layer.visible,
+      layerId: layer.id,
+      selectedFeatureKey,
+      featureKey: feature?.properties?.__featureKey || null,
+    });
+    return forcePointStyle
+      ? createPointStyle(layer, visualState)
+      : createVectorStyle(layer, visualState);
+  }
+
   const geoJsonLayer = L.geoJSON(layer.data, {
     interactive,
 
-    // style() se llama por Leaflet cada vez que necesita el estilo de un polígono/línea.
-    // Al leer stateRef.current en lugar de una variable capturada, obtenemos
-    // siempre el estado actual (focusedLayerId, hoveredLayerId, selectedFeatureKey)
-    // aunque la función haya sido creada hace tiempo.
-    style: (feature) => {
-      const { focusedLayerId, hoveredLayerId, selectedFeatureKey } =
-        stateRef.current;
-      const visualState = getVisualState({
-        focusedLayerId,
-        hoveredLayerId,
-        isLayerVisible: layer.visible,
-        layerId: layer.id,
-        selectedFeatureKey,
-        featureKey: feature?.properties?.__featureKey || null,
-      });
-      return createVectorStyle(layer, visualState);
-    },
+    // style() se llama por Leaflet cada vez que necesita el estilo de un polígono/línea,
+    // y también por resetStyle() en Effect 2. Al leer stateRef.current obtenemos
+    // siempre el estado actual sin depender de closures "congelados".
+    style: (feature) => resolveStyle(feature),
 
-    // pointToLayer() convierte features de tipo Point/MultiPoint en CircleMarker.
-    // Leaflet por defecto los convertiría en Marker con icono de pin azul,
-    // que no permite cambio de color dinámico. Con CircleMarker podemos
-    // actualizar el estilo con setStyle() igual que los polígonos.
+    // pointToLayer() convierte features de tipo Point/MultiPoint en un marcador visual.
+    //
+    // Si la capa tiene un icono personalizado en layerIcons.js → usa L.divIcon (PNG).
+    //   El estado visual (selected/dimmed/highlighted) se gestiona mediante
+    //   data-vs en el elemento DOM, que CSS transforma en filtros visuales.
+    //   Effect 2 en MapView.jsx actualiza el atributo data-vs sin recrear el marcador.
+    //
+    // Si no hay icono personalizado → usa L.circleMarker (comportamiento original).
+    //   CircleMarker soporta setStyle() y permite cambio dinámico de color/radio.
     pointToLayer: (feature, latlng) => {
       const { focusedLayerId, hoveredLayerId, selectedFeatureKey } =
         stateRef.current;
+      const featureKey = feature?.properties?.__featureKey || null;
       const visualState = getVisualState({
         focusedLayerId,
         hoveredLayerId,
         isLayerVisible: layer.visible,
         layerId: layer.id,
         selectedFeatureKey,
-        featureKey: feature?.properties?.__featureKey || null,
+        featureKey,
       });
+
+      const iconUrl = getLayerIcon(layer.name);
+      if (iconUrl) {
+        // Icono personalizado: L.divIcon con atributo data-vs para estados CSS
+        const divIcon = L.divIcon({
+          className: '',  // sin clase extra de Leaflet — manejamos todo con nuestro CSS
+          html: `<div class="lmap-icon-wrap" data-vs="${visualState}"><img class="lmap-icon" src="${iconUrl}" alt="" draggable="false" /></div>`,
+          iconSize: [30, 30],
+          iconAnchor: [15, 15],
+          popupAnchor: [0, -16],
+        });
+        return L.marker(latlng, { icon: divIcon, interactive: true });
+      }
+
+      // Sin icono personalizado: CircleMarker con estilo dinámico (comportamiento original)
       const style = createPointStyle(layer, visualState);
       return L.circleMarker(latlng, style);
     },
@@ -320,18 +353,7 @@ export function createGeoJsonLayer({
       // no un valor congelado del momento en que se creó el evento.
       leafletLayer.on('mouseover', () => {
         if (typeof leafletLayer.setStyle === 'function') {
-          const { focusedLayerId, hoveredLayerId, selectedFeatureKey } =
-            stateRef.current;
-          const featureKey = feature?.properties?.__featureKey || null;
-          const currentVisualState = getVisualState({
-            focusedLayerId,
-            hoveredLayerId,
-            isLayerVisible: layer.visible,
-            layerId: layer.id,
-            selectedFeatureKey,
-            featureKey,
-          });
-          const baseStyle = createVectorStyle(layer, currentVisualState);
+          const baseStyle = resolveStyle(feature);
           leafletLayer.setStyle(buildFeatureHoverStyle(leafletLayer, baseStyle));
         }
 

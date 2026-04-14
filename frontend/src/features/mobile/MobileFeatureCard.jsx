@@ -14,6 +14,18 @@ import {
   renderField,
 } from './featureDetailUtils';
 
+// SEC-01: Valida que un href sea una URL http/https segura antes de renderizarla.
+// Previene javascript: URIs provenientes de propiedades GeoJSON de la BD.
+function isSafeUrl(value) {
+  if (!value || typeof value !== 'string') return false;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 const TITLE_KEYS = [
   'OBRA',
   'obra',
@@ -253,7 +265,8 @@ function resolveGoogleMapsField(properties, coords) {
   const entry = firstPropertyEntry(properties, GOOGLE_MAPS_KEYS);
   const href = formatFieldValue(entry?.value);
 
-  if (href) {
+  // SEC-01: solo usar href si es una URL http/https válida
+  if (href && isSafeUrl(href)) {
     return {
       label: 'Google Maps',
       value: (
@@ -337,14 +350,18 @@ function ProgressBar({ value }) {
 }
 
 function MobileFeatureCard() {
-  const { selectedFeature } = useGISWorkspace();
+  const { actions, selectedFeature } = useGISWorkspace();
   const [isOpen, setIsOpen] = React.useState(true);
+  const [shareToast, setShareToast] = React.useState(false);
   const properties = React.useMemo(
     () => selectedFeature?.properties || null,
     [selectedFeature]
   );
   const safeProperties = React.useMemo(() => properties || {}, [properties]);
   const tableroLink = getTableroLink(safeProperties);
+
+  // SEC-01: validar tableroLink antes de usarlo como href
+  const safeTableroLink = isSafeUrl(tableroLink) ? tableroLink : null;
 
   React.useEffect(() => {
     if (selectedFeature) {
@@ -371,7 +388,39 @@ function MobileFeatureCard() {
     console.log('TABLERO LINK:', tableroLink, safeProperties);
   }, [safeProperties, selectedFeature, tableroLink]);
 
-  if (!selectedFeature || !isOpen) return null;
+  if (!selectedFeature) return null;
+
+  // BUG-02: Mini-chip cuando la ficha está minimizada — permite reabrir sin clic en el mapa
+  if (!isOpen) {
+    const miniTitle =
+      formatFieldValue(firstPropertyEntry(safeProperties, TITLE_KEYS)?.value) ||
+      formatFieldValue(selectedFeature.layerName) ||
+      'Obra seleccionada';
+
+    return (
+      <div className="mfc-mini">
+        <span className="mfc-mini__title">{miniTitle}</span>
+        <button
+          aria-label="Ver ficha de la obra"
+          className="mfc-mini__btn"
+          onClick={() => setIsOpen(true)}
+          type="button"
+        >
+          Ver ficha
+        </button>
+        <button
+          aria-label="Cerrar selección"
+          className="mfc-mini__close"
+          onClick={() => actions.setSelectedFeature(null)}
+          type="button"
+        >
+          <svg fill="none" height="14" viewBox="0 0 14 14" width="14" xmlns="http://www.w3.org/2000/svg">
+            <path d="M11 3 3 11M3 3l8 8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
+          </svg>
+        </button>
+      </div>
+    );
+  }
 
   const title =
     formatFieldValue(firstPropertyEntry(safeProperties, TITLE_KEYS)?.value) ||
@@ -409,24 +458,65 @@ function MobileFeatureCard() {
   const statusTone = getStatusTone({ diferencia, estatus, isRisk });
   const statusText = isRisk ? 'En riesgo' : estatus || 'Seguimiento activo';
 
+  // BONUS: Compartir obra usando Web Share API o fallback a portapapeles
+  const handleShare = () => {
+    const shareTitle = title !== 'Sin nombre' ? title : (selectedFeature.layerName || 'Obra SOBSE');
+    const coordText = coordinatesField ? `\nCoordenadas: ${coordinatesField.value}` : '';
+    const avanceText = Number.isFinite(avanceReal) ? `\nAvance: ${avanceReal}%` : '';
+    const shareText = `${shareTitle}\n${layerLabel}\nEstatus: ${statusText}${avanceText}${coordText}`;
+
+    if (navigator.share) {
+      navigator.share({ title: shareTitle, text: shareText }).catch(() => {});
+    } else if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(shareText).then(() => {
+        setShareToast(true);
+        setTimeout(() => setShareToast(false), 2200);
+      }).catch(() => {});
+    }
+  };
+
   return (
     <div className="mfc">
       <div className="mfc__inner">
         <div className="panel-header">
           <h3 className="panel-title">Detalle de obra</h3>
-          <button
-            aria-label="Minimizar detalle"
-            className="minimize-btn"
-            onClick={() => setIsOpen(false)}
-            type="button"
-          >
-            −
-          </button>
+          <div className="panel-header__actions">
+            <button
+              aria-label="Compartir obra"
+              className="icon-btn"
+              onClick={handleShare}
+              title="Compartir"
+              type="button"
+            >
+              <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="18" cy="5" r="3" stroke="currentColor" strokeWidth="1.8" />
+                <circle cx="6" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                <circle cx="18" cy="19" r="3" stroke="currentColor" strokeWidth="1.8" />
+                <path d="m8.59 13.51 6.83 3.98M15.41 6.51 8.59 10.49" stroke="currentColor" strokeWidth="1.8" />
+              </svg>
+            </button>
+            <button
+              aria-label="Minimizar detalle"
+              className="icon-btn"
+              onClick={() => setIsOpen(false)}
+              title="Minimizar"
+              type="button"
+            >
+              <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                <path d="M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+              </svg>
+            </button>
+          </div>
         </div>
-        {tableroLink ? (
+        {shareToast && (
+          <div className="share-toast" role="status">
+            Información copiada al portapapeles
+          </div>
+        )}
+        {safeTableroLink ? (
           <a
             className="tablero-btn"
-            href={tableroLink}
+            href={safeTableroLink}
             rel="noopener noreferrer"
             target="_blank"
           >

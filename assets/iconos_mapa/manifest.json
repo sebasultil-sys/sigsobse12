@@ -1,0 +1,808 @@
+{
+  "categorias": {
+    "formas": [
+      {
+        "id": "forma_circulo_rojo",
+        "nombre": "Círculo rojo",
+        "icono": "formas/forma_circulo_rojo.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "forma_cuadrado_rojo",
+        "nombre": "Cuadrado rojo",
+        "icono": "formas/forma_cuadrado_rojo.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "forma_rombo_rojo",
+        "nombre": "Rombo rojo",
+        "icono": "formas/forma_rombo_rojo.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "forma_estrella_rojo",
+        "nombre": "Estrella rojo",
+        "icono": "formas/forma_estrella_rojo.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "forma_pin_rojo",
+        "nombre": "Pin rojo",
+        "icono": "formas/forma_pin_rojo.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "forma_circulo_azul",
+        "nombre": "Círculo azul",
+        "icono": "formas/forma_circulo_azul.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "forma_cuadrado_azul",
+        "nombre": "Cuadrado azul",
+        "icono": "formas/forma_cuadrado_azul.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "forma_rombo_azul",
+        "nombre": "Rombo azul",
+        "icono": "formas/forma_rombo_azul.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "forma_estrella_azul",
+        "nombre": "Estrella azul",
+        "icono": "formas/forma_estrella_azul.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "forma_pin_azul",
+        "nombre": "Pin azul",
+        "icono": "formas/forma_pin_azul.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "forma_circulo_verde",
+        "nombre": "Círculo verde",
+        "icono": "formas/forma_circulo_verde.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "forma_cuadrado_verde",
+        "nombre": "Cuadrado verde",
+        "icono": "formas/forma_cuadrado_verde.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "forma_rombo_verde",
+        "nombre": "Rombo verde",
+        "icono": "formas/forma_rombo_verde.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "forma_estrella_verde",
+        "nombre": "Estrella verde",
+        "icono": "formas/forma_estrella_verde.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "forma_pin_verde",
+        "nombre": "Pin verde",
+        "icono": "formas/forma_pin_verde.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "forma_circulo_naranja",
+        "nombre": "Círculo naranja",
+        "icono": "formas/forma_circulo_naranja.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "forma_cuadrado_naranja",
+        "nombre": "Cuadrado naranja",
+        "icono": "formas/forma_cuadrado_naranja.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "forma_rombo_naranja",
+        "nombre": "Rombo naranja",
+        "icono": "formas/forma_rombo_naranja.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "forma_estrella_naranja",
+        "nombre": "Estrella naranja",
+        "icono": "formas/forma_estrella_naranja.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "forma_pin_naranja",
+        "nombre": "Pin naranja",
+        "icono": "formas/forma_pin_naranja.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "forma_circulo_gris",
+        "nombre": "Círculo gris",
+        "icono": "formas/forma_circulo_gris.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#4B5563"
+      },
+      {
+        "id": "forma_cuadrado_gris",
+        "nombre": "Cuadrado gris",
+        "icono": "formas/forma_cuadrado_gris.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#4B5563"
+      },
+      {
+        "id": "forma_rombo_gris",
+        "nombre": "Rombo gris",
+        "icono": "formas/forma_rombo_gris.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#4B5563"
+      },
+      {
+        "id": "forma_estrella_gris",
+        "nombre": "Estrella gris",
+        "icono": "formas/forma_estrella_gris.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#4B5563"
+      },
+      {
+        "id": "forma_pin_gris",
+        "nombre": "Pin gris",
+        "icono": "formas/forma_pin_gris.svg",
+        "categoria": "formas",
+        "tipo": "marker",
+        "color": "#4B5563"
+      }
+    ],
+    "letras": [
+      {
+        "id": "letra_A",
+        "nombre": "Marcador A",
+        "icono": "letras/letra_A.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "A"
+      },
+      {
+        "id": "letra_B",
+        "nombre": "Marcador B",
+        "icono": "letras/letra_B.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "B"
+      },
+      {
+        "id": "letra_C",
+        "nombre": "Marcador C",
+        "icono": "letras/letra_C.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "C"
+      },
+      {
+        "id": "letra_D",
+        "nombre": "Marcador D",
+        "icono": "letras/letra_D.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "D"
+      },
+      {
+        "id": "letra_E",
+        "nombre": "Marcador E",
+        "icono": "letras/letra_E.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "E"
+      },
+      {
+        "id": "letra_F",
+        "nombre": "Marcador F",
+        "icono": "letras/letra_F.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "F"
+      },
+      {
+        "id": "letra_G",
+        "nombre": "Marcador G",
+        "icono": "letras/letra_G.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "G"
+      },
+      {
+        "id": "letra_H",
+        "nombre": "Marcador H",
+        "icono": "letras/letra_H.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "H"
+      },
+      {
+        "id": "letra_I",
+        "nombre": "Marcador I",
+        "icono": "letras/letra_I.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "I"
+      },
+      {
+        "id": "letra_J",
+        "nombre": "Marcador J",
+        "icono": "letras/letra_J.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "J"
+      },
+      {
+        "id": "letra_K",
+        "nombre": "Marcador K",
+        "icono": "letras/letra_K.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "K"
+      },
+      {
+        "id": "letra_L",
+        "nombre": "Marcador L",
+        "icono": "letras/letra_L.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "L"
+      },
+      {
+        "id": "letra_M",
+        "nombre": "Marcador M",
+        "icono": "letras/letra_M.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "M"
+      },
+      {
+        "id": "letra_N",
+        "nombre": "Marcador N",
+        "icono": "letras/letra_N.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "N"
+      },
+      {
+        "id": "letra_O",
+        "nombre": "Marcador O",
+        "icono": "letras/letra_O.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "O"
+      },
+      {
+        "id": "letra_P",
+        "nombre": "Marcador P",
+        "icono": "letras/letra_P.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "P"
+      },
+      {
+        "id": "letra_Q",
+        "nombre": "Marcador Q",
+        "icono": "letras/letra_Q.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "Q"
+      },
+      {
+        "id": "letra_R",
+        "nombre": "Marcador R",
+        "icono": "letras/letra_R.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "R"
+      },
+      {
+        "id": "letra_S",
+        "nombre": "Marcador S",
+        "icono": "letras/letra_S.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "S"
+      },
+      {
+        "id": "letra_T",
+        "nombre": "Marcador T",
+        "icono": "letras/letra_T.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "T"
+      },
+      {
+        "id": "letra_U",
+        "nombre": "Marcador U",
+        "icono": "letras/letra_U.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "U"
+      },
+      {
+        "id": "letra_V",
+        "nombre": "Marcador V",
+        "icono": "letras/letra_V.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "V"
+      },
+      {
+        "id": "letra_W",
+        "nombre": "Marcador W",
+        "icono": "letras/letra_W.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "W"
+      },
+      {
+        "id": "letra_X",
+        "nombre": "Marcador X",
+        "icono": "letras/letra_X.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "X"
+      },
+      {
+        "id": "letra_Y",
+        "nombre": "Marcador Y",
+        "icono": "letras/letra_Y.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "Y"
+      },
+      {
+        "id": "letra_Z",
+        "nombre": "Marcador Z",
+        "icono": "letras/letra_Z.svg",
+        "categoria": "letras",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "texto": "Z"
+      }
+    ],
+    "flechas": [
+      {
+        "id": "flecha_arriba_rojo",
+        "nombre": "Flecha arriba rojo",
+        "icono": "flechas/flecha_arriba_rojo.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#691C32",
+        "direccion": "arriba"
+      },
+      {
+        "id": "flecha_arriba_azul",
+        "nombre": "Flecha arriba azul",
+        "icono": "flechas/flecha_arriba_azul.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "direccion": "arriba"
+      },
+      {
+        "id": "flecha_arriba_verde",
+        "nombre": "Flecha arriba verde",
+        "icono": "flechas/flecha_arriba_verde.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#006341",
+        "direccion": "arriba"
+      },
+      {
+        "id": "flecha_arriba_naranja",
+        "nombre": "Flecha arriba naranja",
+        "icono": "flechas/flecha_arriba_naranja.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#EA580C",
+        "direccion": "arriba"
+      },
+      {
+        "id": "flecha_arriba_gris",
+        "nombre": "Flecha arriba gris",
+        "icono": "flechas/flecha_arriba_gris.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#4B5563",
+        "direccion": "arriba"
+      },
+      {
+        "id": "flecha_abajo_rojo",
+        "nombre": "Flecha abajo rojo",
+        "icono": "flechas/flecha_abajo_rojo.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#691C32",
+        "direccion": "abajo"
+      },
+      {
+        "id": "flecha_abajo_azul",
+        "nombre": "Flecha abajo azul",
+        "icono": "flechas/flecha_abajo_azul.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "direccion": "abajo"
+      },
+      {
+        "id": "flecha_abajo_verde",
+        "nombre": "Flecha abajo verde",
+        "icono": "flechas/flecha_abajo_verde.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#006341",
+        "direccion": "abajo"
+      },
+      {
+        "id": "flecha_abajo_naranja",
+        "nombre": "Flecha abajo naranja",
+        "icono": "flechas/flecha_abajo_naranja.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#EA580C",
+        "direccion": "abajo"
+      },
+      {
+        "id": "flecha_abajo_gris",
+        "nombre": "Flecha abajo gris",
+        "icono": "flechas/flecha_abajo_gris.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#4B5563",
+        "direccion": "abajo"
+      },
+      {
+        "id": "flecha_izquierda_rojo",
+        "nombre": "Flecha izquierda rojo",
+        "icono": "flechas/flecha_izquierda_rojo.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#691C32",
+        "direccion": "izquierda"
+      },
+      {
+        "id": "flecha_izquierda_azul",
+        "nombre": "Flecha izquierda azul",
+        "icono": "flechas/flecha_izquierda_azul.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "direccion": "izquierda"
+      },
+      {
+        "id": "flecha_izquierda_verde",
+        "nombre": "Flecha izquierda verde",
+        "icono": "flechas/flecha_izquierda_verde.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#006341",
+        "direccion": "izquierda"
+      },
+      {
+        "id": "flecha_izquierda_naranja",
+        "nombre": "Flecha izquierda naranja",
+        "icono": "flechas/flecha_izquierda_naranja.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#EA580C",
+        "direccion": "izquierda"
+      },
+      {
+        "id": "flecha_izquierda_gris",
+        "nombre": "Flecha izquierda gris",
+        "icono": "flechas/flecha_izquierda_gris.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#4B5563",
+        "direccion": "izquierda"
+      },
+      {
+        "id": "flecha_derecha_rojo",
+        "nombre": "Flecha derecha rojo",
+        "icono": "flechas/flecha_derecha_rojo.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#691C32",
+        "direccion": "derecha"
+      },
+      {
+        "id": "flecha_derecha_azul",
+        "nombre": "Flecha derecha azul",
+        "icono": "flechas/flecha_derecha_azul.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#1D4ED8",
+        "direccion": "derecha"
+      },
+      {
+        "id": "flecha_derecha_verde",
+        "nombre": "Flecha derecha verde",
+        "icono": "flechas/flecha_derecha_verde.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#006341",
+        "direccion": "derecha"
+      },
+      {
+        "id": "flecha_derecha_naranja",
+        "nombre": "Flecha derecha naranja",
+        "icono": "flechas/flecha_derecha_naranja.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#EA580C",
+        "direccion": "derecha"
+      },
+      {
+        "id": "flecha_derecha_gris",
+        "nombre": "Flecha derecha gris",
+        "icono": "flechas/flecha_derecha_gris.svg",
+        "categoria": "flechas",
+        "tipo": "marker",
+        "color": "#4B5563",
+        "direccion": "derecha"
+      }
+    ],
+    "basico": [
+      {
+        "id": "chincheta_rojo",
+        "nombre": "Chincheta rojo",
+        "icono": "basico/chincheta_rojo.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "chincheta_azul",
+        "nombre": "Chincheta azul",
+        "icono": "basico/chincheta_azul.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "chincheta_verde",
+        "nombre": "Chincheta verde",
+        "icono": "basico/chincheta_verde.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "chincheta_naranja",
+        "nombre": "Chincheta naranja",
+        "icono": "basico/chincheta_naranja.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "chincheta_gris",
+        "nombre": "Chincheta gris",
+        "icono": "basico/chincheta_gris.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#4B5563"
+      },
+      {
+        "id": "objetivo_rojo",
+        "nombre": "Objetivo rojo",
+        "icono": "basico/objetivo_rojo.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#691C32"
+      },
+      {
+        "id": "objetivo_azul",
+        "nombre": "Objetivo azul",
+        "icono": "basico/objetivo_azul.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "objetivo_verde",
+        "nombre": "Objetivo verde",
+        "icono": "basico/objetivo_verde.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "objetivo_naranja",
+        "nombre": "Objetivo naranja",
+        "icono": "basico/objetivo_naranja.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "objetivo_gris",
+        "nombre": "Objetivo gris",
+        "icono": "basico/objetivo_gris.svg",
+        "categoria": "basico",
+        "tipo": "marker",
+        "color": "#4B5563"
+      }
+    ],
+    "desastres": [
+      {
+        "id": "desastre_sismo",
+        "nombre": "Desastre: sismo",
+        "icono": "desastres/desastre_sismo.svg",
+        "categoria": "desastres",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "desastre_inundacion",
+        "nombre": "Desastre: inundacion",
+        "icono": "desastres/desastre_inundacion.svg",
+        "categoria": "desastres",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "desastre_incendio",
+        "nombre": "Desastre: incendio",
+        "icono": "desastres/desastre_incendio.svg",
+        "categoria": "desastres",
+        "tipo": "marker",
+        "color": "#DC2626"
+      },
+      {
+        "id": "desastre_tormenta",
+        "nombre": "Desastre: tormenta",
+        "icono": "desastres/desastre_tormenta.svg",
+        "categoria": "desastres",
+        "tipo": "marker",
+        "color": "#4B5563"
+      }
+    ],
+    "dano": [
+      {
+        "id": "dano_dano_puente",
+        "nombre": "Daño: dano_puente",
+        "icono": "dano/dano_dano_puente.svg",
+        "categoria": "dano",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "dano_dano_carretera",
+        "nombre": "Daño: dano_carretera",
+        "icono": "dano/dano_dano_carretera.svg",
+        "categoria": "dano",
+        "tipo": "marker",
+        "color": "#EA580C"
+      },
+      {
+        "id": "dano_dano_edificio",
+        "nombre": "Daño: dano_edificio",
+        "icono": "dano/dano_dano_edificio.svg",
+        "categoria": "dano",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      }
+    ],
+    "gobierno": [
+      {
+        "id": "gob_hospital",
+        "nombre": "Gobierno: hospital",
+        "icono": "gobierno/gob_hospital.svg",
+        "categoria": "gobierno",
+        "tipo": "marker",
+        "color": "#DC2626"
+      },
+      {
+        "id": "gob_escuela",
+        "nombre": "Gobierno: escuela",
+        "icono": "gobierno/gob_escuela.svg",
+        "categoria": "gobierno",
+        "tipo": "marker",
+        "color": "#FACC15"
+      },
+      {
+        "id": "gob_parque",
+        "nombre": "Gobierno: parque",
+        "icono": "gobierno/gob_parque.svg",
+        "categoria": "gobierno",
+        "tipo": "marker",
+        "color": "#006341"
+      },
+      {
+        "id": "gob_transporte",
+        "nombre": "Gobierno: transporte",
+        "icono": "gobierno/gob_transporte.svg",
+        "categoria": "gobierno",
+        "tipo": "marker",
+        "color": "#1D4ED8"
+      },
+      {
+        "id": "gob_oficina",
+        "nombre": "Gobierno: oficina",
+        "icono": "gobierno/gob_oficina.svg",
+        "categoria": "gobierno",
+        "tipo": "marker",
+        "color": "#4B5563"
+      }
+    ]
+  }
+}

@@ -6,10 +6,14 @@ function BottomSheet({ children, isOpen, onClose, subtitle, title }) {
   const [dragOffset, setDragOffset] = React.useState(0);
   const [isDragging, setIsDragging] = React.useState(false);
   const dragStateRef = React.useRef(null);
+  // Ref para evitar que dragOffset en el closure de handleUp quede desactualizado
+  // y para no incluirlo en deps del effect (lo cual re-registraba listeners en cada frame).
+  const dragOffsetRef = React.useRef(0);
 
   React.useEffect(() => {
     if (!isOpen) {
       setDragOffset(0);
+      dragOffsetRef.current = 0;
     }
   }, [isOpen]);
 
@@ -18,14 +22,17 @@ function BottomSheet({ children, isOpen, onClose, subtitle, title }) {
 
     const handleMove = (event) => {
       if (!dragStateRef.current) return;
-      const delta = event.clientY - dragStateRef.current.startY;
-      setDragOffset(Math.max(0, delta));
+      const delta = Math.max(0, event.clientY - dragStateRef.current.startY);
+      dragOffsetRef.current = delta;
+      setDragOffset(delta);
     };
 
     const handleUp = () => {
       if (!dragStateRef.current) return;
-      if (dragOffset > CLOSE_THRESHOLD) onClose();
+      // Leer el ref, no el closure — evita leer valor desactualizado
+      if (dragOffsetRef.current > CLOSE_THRESHOLD) onClose();
       dragStateRef.current = null;
+      dragOffsetRef.current = 0;
       setIsDragging(false);
       setDragOffset(0);
     };
@@ -36,7 +43,9 @@ function BottomSheet({ children, isOpen, onClose, subtitle, title }) {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
-  }, [dragOffset, isDragging, onClose]);
+    // dragOffset ya NO está en deps — se lee por ref.
+    // Esto evita des-registrar y re-registrar listeners en cada frame del drag.
+  }, [isDragging, onClose]);
 
   const handlePointerDown = (event) => {
     dragStateRef.current = { startY: event.clientY };

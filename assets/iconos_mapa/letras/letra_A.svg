@@ -1,0 +1,6 @@
+<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <path d="M16 2 C10 2 7 7 7 11.5 C7 17.5 16 28 16 28 C16 28 25 17.5 25 11.5 C25 7 22 2 16 2 Z" fill="#1D4ED8"/>
+  <text x="16" y="15.5" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="white" font-weight="bold">
+    A
+  </text>
+</svg>

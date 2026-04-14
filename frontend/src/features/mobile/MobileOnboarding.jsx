@@ -29,7 +29,9 @@ export function shouldShowOnboarding() {
   try {
     return !localStorage.getItem(STORAGE_KEY);
   } catch {
-    return false;
+    // En modo privado/incógnito localStorage lanza excepción.
+    // Mostrar el onboarding igualmente para no perder la guía de primera vez.
+    return true;
   }
 }
 

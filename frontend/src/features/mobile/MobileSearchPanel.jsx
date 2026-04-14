@@ -68,25 +68,31 @@ const FIELD_KEYS = {
   colonia: ['COLONIA', 'colonia'],
   alcaldia: ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía'],
   programa: ['PROGRAMA', 'programa'],
+  contrato: ['CONTRATO', 'N_CONTRATO', 'NO_CONTRATO', 'NUM_CONTRATO', 'contrato', 'F_CONTRATO', 'F_CONTRAT'],
   tipo: ['TIPO', 'tipo', 'TIPO_OBRA', 'tipo_obra'],
   frente: ['FRENTE', 'frente'],
 };
 
 const SEARCH_SCOPES = [
-  { id: 'direccion', label: 'Dirección', keys: FIELD_KEYS.direccion },
+  { id: 'plantel', label: 'Plantel', keys: FIELD_KEYS.plantel },
   { id: 'colonia', label: 'Colonia', keys: FIELD_KEYS.colonia },
   { id: 'programa', label: 'Programa', keys: FIELD_KEYS.programa },
+  { id: 'contrato', label: 'Contrato', keys: FIELD_KEYS.contrato },
+  { id: 'direccion', label: 'Dirección', keys: FIELD_KEYS.direccion },
 ];
 const MAX_RESULTS = 25;
 const SUGGESTION_LIMIT_BY_SCOPE = {
-  direccion: 5,
+  plantel: 7,
   colonia: 7,
   programa: 7,
+  contrato: 5,
+  direccion: 5,
 };
 
 const SEARCHABLE_FIELDS = [
   { id: 'plantel', label: 'Plantel', keys: FIELD_KEYS.plantel, weight: 9 },
   { id: 'obra', label: 'Obra', keys: FIELD_KEYS.obra, weight: 8 },
+  { id: 'contrato', label: 'Contrato', keys: FIELD_KEYS.contrato, weight: 7 },
   { id: 'direccion', label: 'Dirección', keys: FIELD_KEYS.direccion, weight: 6 },
   { id: 'colonia', label: 'Colonia', keys: FIELD_KEYS.colonia, weight: 6 },
   { id: 'alcaldia', label: 'Alcaldía', keys: FIELD_KEYS.alcaldia, weight: 5 },
@@ -391,13 +397,15 @@ function groupRankedResults(results, activeScope) {
 function MobileSearchPanel({ onClose }) {
   const { actions, filteredLayers, layers, mapApi } = useGISWorkspace();
   const [query, setQuery] = React.useState('');
-  const [activeScope, setActiveScope] = React.useState('direccion');
+  const [activeScope, setActiveScope] = React.useState(null);
   const inputRef = React.useRef(null);
 
   React.useEffect(() => {
-    const timer = setTimeout(() => inputRef.current?.focus(), 120);
-    return () => clearTimeout(timer);
-  }, []);
+    if (activeScope) {
+      const timer = setTimeout(() => inputRef.current?.focus(), 80);
+      return () => clearTimeout(timer);
+    }
+  }, [activeScope]);
 
   const filteredFeatureKeys = React.useMemo(() => {
     const keys = new Set();
@@ -412,13 +420,17 @@ function MobileSearchPanel({ onClose }) {
     return keys;
   }, [filteredLayers]);
 
+  // BUG-07: indexar solo capas que ya tienen datos cargados para evitar
+  // flatMap sobre capas vacías (capas de BD pendientes de carga).
   const searchIndex = React.useMemo(
     () =>
-      layers.flatMap((layer) =>
-        (layer.data?.features || []).map((feature) =>
-          buildIndexedFeature({ feature, layer })
-        )
-      ),
+      layers
+        .filter((layer) => (layer.data?.features?.length || 0) > 0)
+        .flatMap((layer) =>
+          (layer.data?.features || []).map((feature) =>
+            buildIndexedFeature({ feature, layer })
+          )
+        ),
     [layers]
   );
   const scopeSuggestions = React.useMemo(
@@ -427,7 +439,10 @@ function MobileSearchPanel({ onClose }) {
   );
 
   const rawResults = React.useMemo(
-    () => getRankedResults(searchIndex, query, activeScope),
+    () =>
+      activeScope
+        ? getRankedResults(searchIndex, query, activeScope, { scopeOnly: true })
+        : [],
     [activeScope, query, searchIndex]
   );
   const results = React.useMemo(
@@ -476,10 +491,9 @@ function MobileSearchPanel({ onClose }) {
 
   const hasQuery = normalize(query).length >= 2;
   const activeScopeConfig = getScopeById(activeScope);
-  const placeholder =
-    activeScopeConfig
-      ? `Buscar por ${activeScopeConfig.label.toLowerCase()}...`
-      : 'Buscar plantel, dirección, colonia o programa...';
+  const placeholder = activeScope === null
+    ? 'Selecciona un tipo de búsqueda ↓'
+    : `Buscar por ${activeScopeConfig.label.toLowerCase()}...`;
 
   return (
     <div className="msearch">
@@ -493,7 +507,8 @@ function MobileSearchPanel({ onClose }) {
           src={SEARCH_LOGO_SRC}
         />
         <input
-          className="msearch__input search-input"
+          className={`msearch__input search-input${activeScope === null ? ' is-locked' : ''}`}
+          disabled={activeScope === null}
           placeholder={placeholder}
           ref={inputRef}
           type="search"
@@ -523,8 +538,8 @@ function MobileSearchPanel({ onClose }) {
             }`}
             key={scope.id}
             onClick={() => {
+              if (activeScope !== scope.id) setQuery('');
               setActiveScope(scope.id);
-              inputRef.current?.focus();
             }}
             type="button"
           >
@@ -564,10 +579,22 @@ function MobileSearchPanel({ onClose }) {
         </div>
       )}
 
-      {!hasQuery && (
+      {activeScope === null && (
+        <div className="msearch__start msearch__start--pick">
+          <span className="msearch__pick-icon">🔍</span>
+          <p className="msearch__hint msearch__hint--bold">
+            Elige un tipo para comenzar
+          </p>
+          <p className="msearch__hint">
+            Plantel · Colonia · Programa · Contrato · Dirección
+          </p>
+        </div>
+      )}
+
+      {activeScope !== null && !hasQuery && scopeSuggestions.length === 0 && (
         <div className="msearch__start">
           <p className="msearch__hint">
-            Escribe para buscar por plantel, dirección, colonia o programa
+            Escribe para buscar por {activeScopeConfig?.label?.toLowerCase() || 'campo'}
           </p>
         </div>
       )}
@@ -582,13 +609,16 @@ function MobileSearchPanel({ onClose }) {
       {results.length > 0 && (
         <div className="msearch__results">
           <span className="msearch__count">{results.length} resultado{results.length !== 1 ? 's' : ''}</span>
-          {results.map(({ feature, group, groupedCount, layer, properties, title }, index) => {
+          {results.map(({ feature, group, groupedCount, layer, properties, title }) => {
             const subtitle = buildResultSubtitle(properties, activeScope);
             const isRisk = properties.RIESGO === true;
+            // BUG-04: clave estable basada en layer + featureKey para evitar
+            // re-render incorrecto cuando la lista de resultados cambia de orden.
+            const resultKey = `${layer.id}-${feature?.properties?.__featureKey || group.value || title}`;
             return (
               <button
                 className="msearch__result"
-                key={index}
+                key={resultKey}
                 onClick={() => handleSelect({ feature, layer })}
                 type="button"
               >

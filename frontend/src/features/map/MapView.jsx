@@ -27,6 +27,49 @@ const EMPTY_DRAW_DRAFT = {
 };
 const ADVANCED_CLICK_TOOLS = new Set(['analysis']);
 
+// ── Capas de transporte renderizadas como puntos ──────────────────────────────
+// Estas capas tienen geometría de línea en PostGIS pero en el mapa se muestran
+// como CircleMarkers (un punto por estación/parada).
+// La leyenda las sigue tratando como "línea" — solo cambia el render visual.
+const TRANSPORT_LAYER_NAMES = ['CABLEBUS', 'TREN LIGERO', 'TROLEBUS'];
+
+function isTransportLayer(name) {
+  return TRANSPORT_LAYER_NAMES.some((t) => (name || '').toUpperCase().includes(t));
+}
+
+// Devuelve el punto representativo de una geometría (centro de línea, primer vértice, etc.)
+// No muta nada — crea un nuevo objeto GeoJSON Point.
+function geometryToMidpoint(geometry) {
+  if (!geometry) return null;
+  if (geometry.type === 'Point') return geometry;
+  if (geometry.type === 'MultiPoint') {
+    return { type: 'Point', coordinates: geometry.coordinates[0] };
+  }
+  if (geometry.type === 'LineString') {
+    const coords = geometry.coordinates;
+    return { type: 'Point', coordinates: coords[Math.floor(coords.length / 2)] };
+  }
+  if (geometry.type === 'MultiLineString') {
+    const line = geometry.coordinates[0] || [];
+    return { type: 'Point', coordinates: line[Math.floor(line.length / 2)] };
+  }
+  return null;
+}
+
+// Devuelve un nuevo objeto capa con todas las geometrías convertidas a puntos.
+// El objeto original (layer.data) NO se modifica.
+function toPointLayer(layer) {
+  const pointFeatures = (layer.data?.features || []).reduce((acc, feature) => {
+    const midpoint = geometryToMidpoint(feature.geometry);
+    if (midpoint) acc.push({ ...feature, geometry: midpoint });
+    return acc;
+  }, []);
+  return {
+    ...layer,
+    data: { ...layer.data, features: pointFeatures },
+  };
+}
+
 function formatDistance(meters) {
   if (meters >= METERS_PER_KILOMETER) {
     return `${(meters / METERS_PER_KILOMETER).toFixed(2)} km`;
@@ -163,95 +206,113 @@ function isDrawMode(mode) {
   );
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 function formatPopulationValue(value) {
   return Number(value || 0).toLocaleString('es-MX');
 }
 
-function buildBufferPopup(radiusKm) {
-  return `
-    <div class="map-popup map-popup--analysis">
-      <div class="map-popup__eyebrow">Buffer</div>
-      <strong>Área de influencia</strong>
-      <table>
-        <tr><th>Radio</th><td>${escapeHtml(radiusKm)} km</td></tr>
-      </table>
+
+// ── Tarjeta de resultado de análisis ─────────────────────────────────────────
+// Reemplaza el antiguo L.popup HTML string. Se renderiza como overlay React
+// sobre el mapa, con estilo glassmorphism tipo ArcGIS/Apple Maps.
+
+function AnalysisMetric({ label, value, accent }) {
+  return (
+    <div className={`acrd-metric${accent ? ' acrd-metric--accent' : ''}`}>
+      <span className="acrd-metric__label">{label}</span>
+      <strong className="acrd-metric__value">{value}</strong>
     </div>
-  `;
+  );
 }
 
-function buildPopulationPopup(result, errorMessage) {
-  if (errorMessage) {
-    return `
-      <div class="map-popup map-popup--analysis">
-        <div class="map-popup__eyebrow">Población</div>
-        <strong>Consulta no disponible</strong>
-        <p>${escapeHtml(errorMessage)}</p>
-      </div>
-    `;
+function AnalysisCard({ result, onClose }) {
+  if (!result) return null;
+  const { type, data } = result;
+
+  let header = null;
+  let body = null;
+  let accentColor = '#691C32';
+
+  if (type === 'buffer') {
+    const areaKm2 = (Math.PI * data.radiusKm * data.radiusKm).toFixed(2);
+    const circumKm = (2 * Math.PI * data.radiusKm).toFixed(2);
+    accentColor = '#691C32';
+    header = (
+      <>
+        <span className="acrd-badge acrd-badge--buffer">Buffer</span>
+        <span className="acrd-header__title">Área de influencia</span>
+      </>
+    );
+    body = (
+      <>
+        <AnalysisMetric label="Radio" value={`${data.radiusKm} km`} accent />
+        <AnalysisMetric label="Área" value={`${areaKm2} km²`} />
+        <AnalysisMetric label="Circunferencia" value={`${circumKm} km`} />
+      </>
+    );
   }
 
-  return `
-    <div class="map-popup map-popup--analysis">
-      <div class="map-popup__eyebrow">Análisis poblacional</div>
-      <strong>Radio ${escapeHtml(result.radiusKm)} km</strong>
-      <table>
-        <tr><th>Manzanas</th><td>${formatPopulationValue(
-          result.featureCount
-        )}</td></tr>
-        <tr><th>Población total</th><td>${formatPopulationValue(
-          result.POBTOT
-        )}</td></tr>
-        <tr><th>Mujeres</th><td>${formatPopulationValue(result.POBFEM)}</td></tr>
-        <tr><th>Hombres</th><td>${formatPopulationValue(result.POBMAS)}</td></tr>
-        <tr><th>0-14 años</th><td>${formatPopulationValue(
-          result.POB0_14
-        )}</td></tr>
-        <tr><th>65+ años</th><td>${formatPopulationValue(
-          result.POB65_MAS
-        )}</td></tr>
-      </table>
-    </div>
-  `;
-}
-
-function buildProximityPopup(layerName, results) {
-  if (!results.length) {
-    return `
-      <div class="map-popup map-popup--analysis">
-        <div class="map-popup__eyebrow">Proximidad</div>
-        <strong>${escapeHtml(layerName)}</strong>
-        <p>No se encontraron elementos cercanos o no hay una capa activa visible.</p>
-      </div>
-    `;
+  if (type === 'population') {
+    accentColor = '#1d4ed8';
+    if (data.error) {
+      header = <span className="acrd-badge acrd-badge--population">Población</span>;
+      body = <p className="acrd-error">{data.error}</p>;
+    } else {
+      header = (
+        <>
+          <span className="acrd-badge acrd-badge--population">Población</span>
+          <span className="acrd-header__title">Radio {data.radiusKm} km</span>
+        </>
+      );
+      body = (
+        <>
+          <AnalysisMetric label="Población total" value={formatPopulationValue(data.POBTOT)} accent />
+          <AnalysisMetric label="Mujeres" value={formatPopulationValue(data.POBFEM)} />
+          <AnalysisMetric label="Hombres" value={formatPopulationValue(data.POBMAS)} />
+          <div className="acrd-divider" />
+          <AnalysisMetric label="0 – 14 años" value={formatPopulationValue(data.POB0_14)} />
+          <AnalysisMetric label="65+ años" value={formatPopulationValue(data.POB65_MAS)} />
+          <div className="acrd-divider" />
+          <AnalysisMetric label="Manzanas" value={formatPopulationValue(data.featureCount)} />
+        </>
+      );
+    }
   }
 
-  const rows = results
-    .map(
-      (item) => `
-        <tr>
-          <th>${escapeHtml(item.label)}</th>
-          <td>${escapeHtml(formatDistance(item.distanceMeters))}</td>
-        </tr>
-      `
-    )
-    .join('');
+  if (type === 'proximity') {
+    accentColor = '#ea580c';
+    header = (
+      <>
+        <span className="acrd-badge acrd-badge--proximity">Proximidad</span>
+        <span className="acrd-header__title">{data.layerName}</span>
+      </>
+    );
+    body = data.results.length === 0
+      ? <p className="acrd-error">No se encontraron elementos cercanos.</p>
+      : data.results.map((item, i) => (
+          <div className="acrd-prox-row" key={item.label + i}>
+            <span className="acrd-prox-rank">{i + 1}</span>
+            <span className="acrd-prox-label">{item.label}</span>
+            <strong className="acrd-prox-dist">{formatDistance(item.distanceMeters)}</strong>
+          </div>
+        ));
+  }
 
-  return `
-    <div class="map-popup map-popup--analysis">
-      <div class="map-popup__eyebrow">Proximidad</div>
-      <strong>${escapeHtml(layerName)}</strong>
-      <table>${rows}</table>
+  return (
+    <div className="acrd" style={{ '--acrd-accent': accentColor }}>
+      <div className="acrd__header">
+        <div className="acrd__header-left">{header}</div>
+        <button
+          aria-label="Cerrar resultado"
+          className="acrd__close"
+          onClick={onClose}
+          type="button"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="acrd__body">{body}</div>
     </div>
-  `;
+  );
 }
 
 function AdvancedToolButton({ active, label, onClick, title }) {
@@ -438,6 +499,8 @@ function MapView({ mode = 'desktop' }) {
   const [analysisMode, setAnalysisMode] = React.useState('population');
   const [bufferRadiusKm, setBufferRadiusKm] = React.useState(1);
   const [populationRadiusKm, setPopulationRadiusKm] = React.useState(1);
+  // Resultado del último análisis — renderizado como tarjeta React (no popup Leaflet)
+  const [analysisResult, setAnalysisResult] = React.useState(null);
   const [expandedDGs, setExpandedDGs] = React.useState({});
   const [isDesktopFeatureCardOpen, setIsDesktopFeatureCardOpen] =
     React.useState(true);
@@ -533,6 +596,7 @@ function MapView({ mode = 'desktop' }) {
     advancedGroupRef.current?.clearLayers();
     hotspotGroupRef.current?.clearLayers();
     mapRef.current?.closePopup();
+    setAnalysisResult(null);
   }, []);
 
   const handleAdvancedToolToggle = React.useCallback(
@@ -868,9 +932,31 @@ function MapView({ mode = 'desktop' }) {
     overlayGroup.clearLayers();
     overlayLayersRef.current.clear();
 
+    if (process.env.NODE_ENV !== 'production') {
+      const visibleWithData = filteredLayers.filter((l) => l.visible && l.data?.features?.length);
+      const visibleNoData   = filteredLayers.filter((l) => l.visible && !(l.data?.features?.length));
+      console.log(
+        `[MapView] Effect 1 — total filteredLayers: ${filteredLayers.length}`,
+        `| renderizando: ${visibleWithData.length}`,
+        `| visible sin datos: ${visibleNoData.length}`,
+      );
+      visibleWithData.forEach((l) =>
+        console.log(`  ✅ ${l.name}: ${l.data.features.length} features, color: ${l.style?.color ?? l.color ?? '?'}`),
+      );
+      visibleNoData.forEach((l) =>
+        console.log(`  ⚠️  ${l.name}: visible=true pero 0 features — ¿no cargó aún?`),
+      );
+    }
+
     filteredLayers
       .filter((layer) => layer.visible && layer.data?.features?.length)
       .forEach((layer) => {
+        // Las capas de transporte (Cablebús, Tren Ligero, Trolebús) tienen geometría
+        // de línea en la base de datos, pero se renderizan como puntos (una parada/
+        // estación por vértice central). Los datos originales no se modifican.
+        const isTransport = isTransportLayer(layer.name);
+        const renderLayer = isTransport ? toPointLayer(layer) : layer;
+
         const geoJsonLayer = createGeoJsonLayer({
           enablePopup: !isMobile,
           // layerStateRef is already up-to-date (updated synchronously during
@@ -879,7 +965,8 @@ function MapView({ mode = 'desktop' }) {
           interactive:
             interactionMode === 'select' &&
             !(ADVANCED_CLICK_TOOLS.has(activeTool) && analysisMode !== 'idle'),
-          layer,
+          layer: renderLayer,
+          forcePointStyle: isTransport,
           onSelectFeature: (payload) => {
             actionsRef.current.focusLayer(payload.layerId);
             actionsRef.current.setSelectedFeature(payload);
@@ -907,12 +994,16 @@ function MapView({ mode = 'desktop' }) {
       layerStateRef.current;
 
     overlayLayersRef.current.forEach(({ geoJsonLayer, layer }) => {
-      // resetStyle re-invokes options.style(feature) which reads from
-      // layerStateRef.current — now always current.
       geoJsonLayer.eachLayer((sublayer) => {
-        geoJsonLayer.resetStyle(sublayer);
+        // ── Path layers (líneas, polígonos, CircleMarker) ──────────────────
+        // resetStyle re-invoca options.style(feature) que lee layerStateRef.current.
+        // GUARD: L.Marker (divIcon) no tiene setStyle — llamar resetStyle sobre él
+        // lanzaría un error, por eso verificamos instanceof L.Path primero.
+        if (sublayer instanceof L.Path) {
+          geoJsonLayer.resetStyle(sublayer);
+        }
 
-        // CircleMarker radius is not a CSS-style property; must be set explicitly.
+        // CircleMarker: el radio no es una propiedad CSS, debe actualizarse explícitamente.
         if (sublayer instanceof L.CircleMarker) {
           const featureKey =
             sublayer.feature?.properties?.__featureKey || null;
@@ -930,6 +1021,24 @@ function MapView({ mode = 'desktop' }) {
           sublayer.setRadius(
             baseRadius + (isSelected ? 2 : isHighlighted ? 1 : 0)
           );
+        }
+
+        // ── L.Marker con divIcon (iconos personalizados PNG) ───────────────
+        // El estado visual se gestiona via data-vs en el elemento .lmap-icon-wrap.
+        // CSS aplica filtros (brillo, opacidad, sombra) según el valor de data-vs.
+        if (sublayer instanceof L.Marker) {
+          const featureKey =
+            sublayer.feature?.properties?.__featureKey || null;
+          const visualState = getVisualState({
+            focusedLayerId,
+            hoveredLayerId: hovered,
+            isLayerVisible: layer.visible,
+            layerId: layer.id,
+            selectedFeatureKey,
+            featureKey,
+          });
+          const iconWrap = sublayer.getElement?.()?.querySelector('.lmap-icon-wrap');
+          if (iconWrap) iconWrap.dataset.vs = visualState;
         }
       });
     });
@@ -1303,6 +1412,7 @@ function MapView({ mode = 'desktop' }) {
     const handleClick = async (event) => {
       advancedGroup.clearLayers();
       map.closePopup();
+      setAnalysisResult(null);
 
       if (analysisMode === 'buffer') {
         L.circle(event.latlng, {
@@ -1321,10 +1431,7 @@ function MapView({ mode = 'desktop' }) {
           fillOpacity: 1,
         }).addTo(advancedGroup);
 
-        L.popup({ maxWidth: 280 })
-          .setLatLng(event.latlng)
-          .setContent(buildBufferPopup(bufferRadiusKm))
-          .openOn(map);
+        setAnalysisResult({ type: 'buffer', data: { radiusKm: bufferRadiusKm } });
         return;
       }
 
@@ -1351,30 +1458,19 @@ function MapView({ mode = 'desktop' }) {
             fillOpacity: 1,
           }).addTo(advancedGroup);
 
-          L.popup({ maxWidth: 320 })
-            .setLatLng(event.latlng)
-            .setContent(buildPopulationPopup(result))
-            .openOn(map);
+          setAnalysisResult({ type: 'population', data: result });
         } catch (error) {
-          L.popup({ maxWidth: 320 })
-            .setLatLng(event.latlng)
-            .setContent(buildPopulationPopup(null, error.message))
-            .openOn(map);
+          setAnalysisResult({ type: 'population', data: { error: error.message } });
         }
         return;
       }
 
       if (analysisMode === 'proximity') {
         if (!proximityLayer) {
-          L.popup({ maxWidth: 300 })
-            .setLatLng(event.latlng)
-            .setContent(
-              buildProximityPopup(
-                'Capa activa',
-                []
-              )
-            )
-            .openOn(map);
+          setAnalysisResult({
+            type: 'proximity',
+            data: { layerName: 'Sin capa activa', results: [] },
+          });
           return;
         }
 
@@ -1409,12 +1505,10 @@ function MapView({ mode = 'desktop' }) {
           }).addTo(advancedGroup);
         });
 
-        L.popup({ maxWidth: 340 })
-          .setLatLng(event.latlng)
-          .setContent(
-            buildProximityPopup(proximityLayer.name, nearestItems)
-          )
-          .openOn(map);
+        setAnalysisResult({
+          type: 'proximity',
+          data: { layerName: proximityLayer.name, results: nearestItems },
+        });
       }
     };
 
@@ -1857,6 +1951,19 @@ function MapView({ mode = 'desktop' }) {
             </div>
           </div>
         ) : null}
+
+        {/* Tarjeta flotante de resultado de análisis */}
+        {analysisResult && (
+          <div className="acrd-wrap">
+            <AnalysisCard
+              result={analysisResult}
+              onClose={() => {
+                setAnalysisResult(null);
+                advancedGroupRef.current?.clearLayers();
+              }}
+            />
+          </div>
+        )}
 
         {showAdvancedTools ? (
           <div className="map-left-tools">

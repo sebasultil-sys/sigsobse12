@@ -1,11 +1,37 @@
 import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 import { getLayerStatus } from '../layers/layerStatus';
+import { getLayerGroupLabel, orderLayerGroupEntries } from '../layers/layerGroups';
+import { getLayerIcon } from '../../config/layerIcons';
 
+// Símbolo de geometría de reserva cuando no hay icono personalizado
 function geomSymbol(geometryType) {
   if (geometryType === 'Point' || geometryType === 'MultiPoint') return '●';
   if (geometryType === 'LineString' || geometryType === 'MultiLineString') return '—';
   return '▭';
+}
+
+// Muestra el icono PNG si existe, o el símbolo de geometría en color de la capa
+function LayerIcon({ layer }) {
+  const iconUrl = getLayerIcon(layer.name);
+  if (iconUrl) {
+    return (
+      <img
+        alt=""
+        className="lp-layer__icon"
+        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+        src={iconUrl}
+      />
+    );
+  }
+  return (
+    <span
+      className="lp-layer__sym"
+      style={{ color: layer.style?.color || layer.color }}
+    >
+      {geomSymbol(layer.geometryType)}
+    </span>
+  );
 }
 
 function getLayerDisplayName(layer) {
@@ -51,7 +77,7 @@ function MobileLayersPanel() {
       if (!map.has(dg)) map.set(dg, []);
       map.get(dg).push(layer);
     });
-    return map;
+    return orderLayerGroupEntries([...map.entries()]);
   }, [layers]);
 
   const layerStatusById = React.useMemo(() => {
@@ -110,7 +136,7 @@ function MobileLayersPanel() {
       </div>
 
       <div className="lp-groups">
-        {[...groups.entries()].map(([dg, dgLayers]) => {
+        {groups.map(([dg, dgLayers]) => {
           const isExpanded = !!expandedDGs[dg];
           const visibleInGroup = dgLayers.filter((l) => l.visible).length;
           const loadingInGroup = dgLayers.filter(
@@ -138,7 +164,7 @@ function MobileLayersPanel() {
                     />
                   </svg>
                 </span>
-                <span className="lp-group__name">{dg}</span>
+                <span className="lp-group__name">{getLayerGroupLabel(dg)}</span>
                 {loadingInGroup > 0 && (
                   <span className="lp-group__meta">{loadingInGroup} cargando</span>
                 )}
@@ -160,12 +186,7 @@ function MobileLayersPanel() {
                         key={layer.id}
                       >
                         <div className="lp-layer__main">
-                          <span
-                            className="lp-layer__sym"
-                            style={{ color: layer.style?.color || layer.color }}
-                          >
-                            {geomSymbol(layer.geometryType)}
-                          </span>
+                          <LayerIcon layer={layer} />
                           <div className="lp-layer__info">
                             <strong title={displayName}>{displayName}</strong>
                             <div className="lp-layer__meta">

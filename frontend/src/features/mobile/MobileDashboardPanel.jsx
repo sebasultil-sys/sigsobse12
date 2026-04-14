@@ -10,7 +10,7 @@ const ANALYSIS_VIEWS = [
 ];
 
 const ANALYSIS_SCOPES = [
-  { id: 'all', label: 'Todas' },
+  { id: 'all', label: 'Cargadas' },
   { id: 'visible', label: 'Activas' },
 ];
 
@@ -125,18 +125,32 @@ function MobileDashboardPanel() {
   const [activeView, setActiveView] = React.useState('general');
   const [scope, setScope] = React.useState('all');
 
-  const databaseLayers = React.useMemo(
-    () => layers.filter((layer) => layer.databaseLayer),
+  // Capas de BD con GeoJSON ya cargado (tienen features reales).
+  // Las capas del catálogo que aún no se han activado tienen data=null y se excluyen.
+  const loadedLayers = React.useMemo(
+    () =>
+      layers.filter(
+        (layer) => layer.databaseLayer && (layer.data?.features?.length ?? 0) > 0
+      ),
+    [layers]
+  );
+
+  // Capas activas en el mapa: cargadas Y visibles.
+  const activeLayers = React.useMemo(
+    () => loadedLayers.filter((layer) => layer.visible),
+    [loadedLayers]
+  );
+
+  // Total de capas en catálogo (para mensaje de estado vacío)
+  const catalogCount = React.useMemo(
+    () => layers.filter((layer) => layer.databaseLayer).length,
     [layers]
   );
 
   const scopedLayers = React.useMemo(() => {
-    if (scope === 'visible') {
-      return databaseLayers.filter((layer) => layer.visible);
-    }
-
-    return databaseLayers;
-  }, [databaseLayers, scope]);
+    if (scope === 'visible') return activeLayers;
+    return loadedLayers;
+  }, [activeLayers, loadedLayers, scope]);
 
   const scopedFeatures = React.useMemo(
     () =>
@@ -182,93 +196,108 @@ function MobileDashboardPanel() {
     return budgetMap;
   }, [scopedLayers]);
 
-  let totalAvance = 0;
-  let avanceCount = 0;
-  let totalRisk = 0;
-  let verde = 0;
-  let amarillo = 0;
-  let rojo = 0;
+  // BUG-06: Envolver todos los cómputos pesados en useMemo para evitar
+  // re-cálculo en cada render cuando el estado del componente no cambia.
 
-  scopedLayers.forEach((layer) => {
-    const metrics = layerMetricsById.get(layer.id);
-    if (!metrics) return;
+  const coreStats = React.useMemo(() => {
+    let totalAvance = 0;
+    let avanceCount = 0;
+    let totalRisk = 0;
+    let verde = 0;
+    let amarillo = 0;
+    let rojo = 0;
 
-    if (metrics.averageProgress != null) {
-      totalAvance += metrics.averageProgress;
-      avanceCount += 1;
-    }
+    scopedLayers.forEach((layer) => {
+      const metrics = layerMetricsById.get(layer.id);
+      if (!metrics) return;
 
-    totalRisk += metrics.riskCount || 0;
+      if (metrics.averageProgress != null) {
+        totalAvance += metrics.averageProgress;
+        avanceCount += 1;
+      }
 
-    if ((metrics.riskCount || 0) === 0) verde += 1;
-    else if ((metrics.riskCount || 0) < (metrics.totalElements || 0)) amarillo += 1;
-    else rojo += 1;
-  });
+      totalRisk += metrics.riskCount || 0;
 
-  const avgAvance = avanceCount > 0 ? totalAvance / avanceCount : null;
-  const avanceColor =
-    avgAvance == null ? undefined
-      : avgAvance >= 80 ? 'ok'
-      : avgAvance >= 50 ? 'warn'
-      : 'risk';
+      if ((metrics.riskCount || 0) === 0) verde += 1;
+      else if ((metrics.riskCount || 0) < (metrics.totalElements || 0)) amarillo += 1;
+      else rojo += 1;
+    });
 
-  const totalBudget = Array.from(layerBudgetById.values()).reduce(
-    (total, amount) => total + amount,
-    0
+    const avgAvance = avanceCount > 0 ? totalAvance / avanceCount : null;
+    const avanceColor =
+      avgAvance == null ? undefined
+        : avgAvance >= 80 ? 'ok'
+        : avgAvance >= 50 ? 'warn'
+        : 'risk';
+
+    return { totalAvance, avanceCount, totalRisk, verde, amarillo, rojo, avgAvance, avanceColor };
+  }, [scopedLayers, layerMetricsById]);
+
+  const { totalRisk, verde, amarillo, rojo, avgAvance, avanceColor } = coreStats;
+
+  const totalBudget = React.useMemo(
+    () => Array.from(layerBudgetById.values()).reduce((total, amount) => total + amount, 0),
+    [layerBudgetById]
   );
 
-  const contracts = new Set();
-  const companies = new Set();
-  const alcaldiaMap = new Map();
+  const featureStats = React.useMemo(() => {
+    const contracts = new Set();
+    const companies = new Set();
+    const alcaldiaMap = new Map();
 
-  scopedFeatures.forEach(({ properties }) => {
-    const contract = firstPropertyValue(properties, [
-      'CONTRATO',
-      'N_CONTRATO',
-      'NO_CONTRATO',
-      'NUM_CONTRATO',
-      'contrato',
-    ]);
-    if (contract) contracts.add(String(contract).trim());
+    scopedFeatures.forEach(({ properties }) => {
+      const contract = firstPropertyValue(properties, [
+        'CONTRATO',
+        'N_CONTRATO',
+        'NO_CONTRATO',
+        'NUM_CONTRATO',
+        'contrato',
+      ]);
+      if (contract) contracts.add(String(contract).trim());
 
-    const company = firstPropertyValue(properties, [
-      'EMPRESA',
-      'N_EMPRESA',
-      'CONTRATISTA',
-      'empresa',
-      'contratista',
-    ]);
-    if (company) companies.add(String(company).trim());
+      const company = firstPropertyValue(properties, [
+        'EMPRESA',
+        'N_EMPRESA',
+        'CONTRATISTA',
+        'empresa',
+        'contratista',
+      ]);
+      if (company) companies.add(String(company).trim());
 
-    const alcaldia =
-      firstPropertyValue(properties, ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía']) ||
-      'Sin alcaldía';
-    const risk = properties?.RIESGO === true ? 1 : 0;
-    const advance = parseNumericValue(
-      firstPropertyValue(properties, ['AVANCE', 'avance', 'PORC_AVANCE', 'porc_avance'])
-    );
+      const alcaldia =
+        firstPropertyValue(properties, ['ALCALDIA', 'alcaldia', 'ALCALDÍA', 'alcaldía']) ||
+        'Sin alcaldía';
+      const risk = properties?.RIESGO === true ? 1 : 0;
+      const advance = parseNumericValue(
+        firstPropertyValue(properties, ['AVANCE', 'avance', 'PORC_AVANCE', 'porc_avance'])
+      );
 
-    if (!alcaldiaMap.has(alcaldia)) {
-      alcaldiaMap.set(alcaldia, {
-        alcaldia,
-        records: 0,
-        risk: 0,
-        progressTotal: 0,
-        progressCount: 0,
-      });
-    }
+      if (!alcaldiaMap.has(alcaldia)) {
+        alcaldiaMap.set(alcaldia, {
+          alcaldia,
+          records: 0,
+          risk: 0,
+          progressTotal: 0,
+          progressCount: 0,
+        });
+      }
 
-    const bucket = alcaldiaMap.get(alcaldia);
-    bucket.records += 1;
-    bucket.risk += risk;
-    if (advance != null) {
-      bucket.progressTotal += advance;
-      bucket.progressCount += 1;
-    }
-  });
+      const bucket = alcaldiaMap.get(alcaldia);
+      bucket.records += 1;
+      bucket.risk += risk;
+      if (advance != null) {
+        bucket.progressTotal += advance;
+        bucket.progressCount += 1;
+      }
+    });
 
-  const dgRows = scopedLayers
-    .reduce((map, layer) => {
+    return { contracts, companies, alcaldiaMap };
+  }, [scopedFeatures]);
+
+  const { contracts, companies, alcaldiaMap } = featureStats;
+
+  const dgSummary = React.useMemo(() => {
+    const dgRows = scopedLayers.reduce((map, layer) => {
       const dg = layer.dg || 'Sin DG';
       const metrics = layerMetricsById.get(layer.id) || {};
       const budget = layerBudgetById.get(layer.id) || 0;
@@ -301,60 +330,81 @@ function MobileDashboardPanel() {
       return map;
     }, new Map());
 
-  const dgSummary = Array.from(dgRows.values())
-    .map((item) => ({
-      ...item,
-      avgProgress:
-        item.progressCount > 0 ? item.progressTotal / item.progressCount : null,
-    }))
-    .sort((left, right) => {
-      if (right.risk !== left.risk) return right.risk - left.risk;
-      return right.records - left.records;
-    });
+    return Array.from(dgRows.values())
+      .map((item) => ({
+        ...item,
+        avgProgress:
+          item.progressCount > 0 ? item.progressTotal / item.progressCount : null,
+      }))
+      .sort((left, right) => {
+        if (right.risk !== left.risk) return right.risk - left.risk;
+        return right.records - left.records;
+      });
+  }, [scopedLayers, layerMetricsById, layerBudgetById]);
 
-  const alcaldiaSummary = Array.from(alcaldiaMap.values())
-    .map((item) => ({
-      ...item,
-      avgProgress:
-        item.progressCount > 0 ? item.progressTotal / item.progressCount : null,
-    }))
-    .sort((left, right) => {
-      if (right.records !== left.records) return right.records - left.records;
-      return right.risk - left.risk;
-    });
+  const alcaldiaSummary = React.useMemo(
+    () =>
+      Array.from(alcaldiaMap.values())
+        .map((item) => ({
+          ...item,
+          avgProgress:
+            item.progressCount > 0 ? item.progressTotal / item.progressCount : null,
+        }))
+        .sort((left, right) => {
+          if (right.records !== left.records) return right.records - left.records;
+          return right.risk - left.risk;
+        }),
+    [alcaldiaMap]
+  );
 
-  const financeLayers = scopedLayers
-    .map((layer) => ({
-      id: layer.id,
-      name: layer.name,
-      budget: layerBudgetById.get(layer.id) || 0,
-      progress: layerMetricsById.get(layer.id)?.averageProgress ?? null,
-    }))
-    .filter((item) => item.budget > 0)
-    .sort((left, right) => right.budget - left.budget)
-    .slice(0, 5);
+  const financeLayers = React.useMemo(
+    () =>
+      scopedLayers
+        .map((layer) => ({
+          id: layer.id,
+          name: layer.name,
+          budget: layerBudgetById.get(layer.id) || 0,
+          progress: layerMetricsById.get(layer.id)?.averageProgress ?? null,
+        }))
+        .filter((item) => item.budget > 0)
+        .sort((left, right) => right.budget - left.budget)
+        .slice(0, 5),
+    [scopedLayers, layerBudgetById, layerMetricsById]
+  );
 
-  const riskLayers = scopedLayers
-    .map((layer) => ({
-      layer,
-      metrics: layerMetricsById.get(layer.id) || {},
-    }))
-    .filter(({ metrics }) => (metrics.riskCount || 0) > 0)
-    .sort((left, right) => {
-      if ((right.metrics.riskCount || 0) !== (left.metrics.riskCount || 0)) {
-        return (right.metrics.riskCount || 0) - (left.metrics.riskCount || 0);
-      }
-      return (right.metrics.averageProgress || 0) - (left.metrics.averageProgress || 0);
-    });
+  const riskLayers = React.useMemo(
+    () =>
+      scopedLayers
+        .map((layer) => ({
+          layer,
+          metrics: layerMetricsById.get(layer.id) || {},
+        }))
+        .filter(({ metrics }) => (metrics.riskCount || 0) > 0)
+        .sort((left, right) => {
+          if ((right.metrics.riskCount || 0) !== (left.metrics.riskCount || 0)) {
+            return (right.metrics.riskCount || 0) - (left.metrics.riskCount || 0);
+          }
+          return (right.metrics.averageProgress || 0) - (left.metrics.averageProgress || 0);
+        }),
+    [scopedLayers, layerMetricsById]
+  );
 
-  const riskDgCount = dgSummary.filter((item) => item.risk > 0).length;
-  const criticalLayerCount = scopedLayers.filter((layer) => {
-    const metrics = layerMetricsById.get(layer.id) || {};
-    return (
-      (metrics.totalElements || 0) > 0 &&
-      (metrics.riskCount || 0) === (metrics.totalElements || 0)
-    );
-  }).length;
+  const riskDgCount = React.useMemo(
+    () => dgSummary.filter((item) => item.risk > 0).length,
+    [dgSummary]
+  );
+
+  const criticalLayerCount = React.useMemo(
+    () =>
+      scopedLayers.filter((layer) => {
+        const metrics = layerMetricsById.get(layer.id) || {};
+        return (
+          (metrics.totalElements || 0) > 0 &&
+          (metrics.riskCount || 0) === (metrics.totalElements || 0)
+        );
+      }).length,
+    [scopedLayers, layerMetricsById]
+  );
 
   const topDg = dgSummary[0] || null;
   const topAlcaldia = alcaldiaSummary[0] || null;
@@ -375,8 +425,8 @@ function MobileDashboardPanel() {
         />
         <KpiCard
           label="Capas activas"
-          note={`${scope === 'visible' ? 'solo visibles' : 'catálogo de BD'}`}
-          value={formatInteger(scopedLayers.filter((layer) => layer.visible).length)}
+          note={`${loadedLayers.length} cargadas · ${catalogCount} en catálogo`}
+          value={formatInteger(activeLayers.length)}
         />
         <KpiCard
           label="Registros"
@@ -400,7 +450,17 @@ function MobileDashboardPanel() {
       <div className="dash-risk-list">
         <strong className="dash-section-title">Capas con elementos en riesgo</strong>
         {scopedLayers.length === 0 ? (
-          <p className="dash-empty">No hay capas de base de datos disponibles</p>
+          <div className="dash-empty-state">
+            <span className="dash-empty-state__icon">📂</span>
+            <strong className="dash-empty-state__title">Sin datos cargados</strong>
+            <p className="dash-empty-state__body">
+              {scope === 'visible'
+                ? activeLayers.length === 0 && loadedLayers.length > 0
+                  ? `Hay ${loadedLayers.length} capas con datos — activa alguna en el panel Capas o cambia a "Cargadas".`
+                  : 'Activa capas desde el panel Capas para ver indicadores.'
+                : `Activa capas desde el panel Capas para cargar datos. ${catalogCount > 0 ? `(${catalogCount} capas disponibles en catálogo)` : ''}`}
+            </p>
+          </div>
         ) : riskLayers.length === 0 ? (
           <p className="dash-empty">Ninguna capa presenta riesgo activo</p>
         ) : (

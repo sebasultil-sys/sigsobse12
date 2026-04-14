@@ -12,6 +12,15 @@ function Ico({ children }) {
   );
 }
 
+function SearchIcon() {
+  return (
+    <Ico>
+      <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.7" />
+      <path d="m20 20-3.5-3.5" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+    </Ico>
+  );
+}
+
 function LayersIcon() {
   return (
     <Ico>
@@ -98,24 +107,28 @@ const NAV_ITEMS = [
     id: 'layers',
     label: 'Capas',
     tooltip: 'Activa información en el mapa',
+    emoji: '🗂',
     IconComponent: LayersIcon,
   },
   {
     id: 'dashboard',
     label: 'Panel',
     tooltip: 'KPIs y semaforización',
+    emoji: '📊',
     IconComponent: DashboardIcon,
   },
   {
     id: 'tools',
     label: 'Herramientas',
     tooltip: 'Medir, dibujar, analizar',
+    emoji: '📐',
     IconComponent: ToolsIcon,
   },
   {
     id: 'more',
     label: 'Más',
     tooltip: 'Leyenda, ayuda, configuración',
+    emoji: '⋯',
     IconComponent: MoreIcon,
   },
 ];
@@ -123,7 +136,7 @@ const NAV_ITEMS = [
 function BottomNav({ activeItem, onSelect }) {
   return (
     <nav aria-label="Menú inferior móvil" className="bnav">
-      {NAV_ITEMS.map(({ id, label, IconComponent }) => (
+      {NAV_ITEMS.map(({ id, label, emoji, IconComponent }) => (
         <button
           aria-label={label}
           className={`bnav__item${activeItem === id ? ' is-active' : ''}`}
@@ -132,7 +145,10 @@ function BottomNav({ activeItem, onSelect }) {
           type="button"
         >
           <span className="bnav__icon-wrap">
-            <IconComponent />
+            {emoji
+              ? <span className="bnav__emoji" aria-hidden="true">{emoji}</span>
+              : <IconComponent />
+            }
             {activeItem === id && <span className="bnav__active-ring" />}
           </span>
           <span className="bnav__label">{label}</span>

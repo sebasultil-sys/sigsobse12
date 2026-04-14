@@ -2,7 +2,13 @@ import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 import FiltersPanel from '../filters/FiltersPanel';
 import LayerStyleEditor from './LayerStyleEditor';
+import {
+  getLayerGroupKey,
+  getLayerGroupLabel,
+  orderLayerGroupEntries,
+} from './layerGroups';
 import { formatLayerCount, getLayerStatus } from './layerStatus';
+import { getLayerIcon } from '../../config/layerIcons';
 
 const GEOJSON_GEOMETRY_TYPES = new Set([
   'Point',
@@ -137,14 +143,12 @@ function LayersPanel() {
     const groups = new Map();
 
     layerSearchResults.forEach((layer) => {
-      const dg = layer.dg || 'Sin DG';
+      const dg = getLayerGroupKey(layer.dg);
       if (!groups.has(dg)) groups.set(dg, []);
       groups.get(dg).push(layer);
     });
 
-    return Array.from(groups.entries()).sort(([left], [right]) =>
-      left.localeCompare(right, 'es')
-    );
+    return orderLayerGroupEntries(Array.from(groups.entries()));
   }, [layerSearchResults]);
 
   React.useEffect(() => {
@@ -302,8 +306,11 @@ function LayersPanel() {
                     />
                   </svg>
                 </span>
-                <span className="lp-group__name" title={dg}>
-                  {dg}
+                <span
+                  className="lp-group__name"
+                  title={getLayerGroupLabel(dg)}
+                >
+                  {getLayerGroupLabel(dg)}
                 </span>
                 <span className="lp-group__count">
                   {visibleInGroup}/{dgLayers.length}
@@ -399,10 +406,19 @@ function LayersPanel() {
                               }}
                               type="button"
                             >
-                              <span
-                                className={`layers-tree__geometry ${geometryClass}`}
-                                style={{ '--layer-color': layer.style?.color || layer.color }}
-                              />
+                              {getLayerIcon(layer.name) ? (
+                                <img
+                                  alt=""
+                                  className="layers-tree__icon"
+                                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                  src={getLayerIcon(layer.name)}
+                                />
+                              ) : (
+                                <span
+                                  className={`layers-tree__geometry ${geometryClass}`}
+                                  style={{ '--layer-color': layer.style?.color || layer.color }}
+                                />
+                              )}
                               <span className="layers-tree__copy">
                                 <span className="layers-tree__title-row">
                                   <strong title={layer.name}>{layer.name}</strong>

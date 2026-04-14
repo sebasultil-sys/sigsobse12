@@ -1,0 +1,35 @@
+Options -MultiViews
+RewriteEngine On
+RewriteBase /
+
+# Servir index.html directamente si se pide
+RewriteRule ^index\.html$ - [L]
+
+# Si el archivo o directorio existe, servir directamente
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+
+# Fallback SPA — todas las rutas apuntan a index.html (React Router)
+RewriteRule . /index.html [L]
+
+# Compresión GZIP para assets estáticos
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json
+</IfModule>
+
+# Cache de assets estáticos (JS/CSS generados por React con hash en el nombre)
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType image/png "access plus 1 month"
+  ExpiresByType image/svg+xml "access plus 1 month"
+  ExpiresByType application/json "access plus 1 hour"
+</IfModule>
+
+# Headers de seguridad básicos
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

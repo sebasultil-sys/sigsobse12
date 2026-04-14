@@ -54,6 +54,36 @@ const DATABASE_LAYER_LOAD_CONCURRENCY = Math.max(
 );
 const LEGACY_BOOTSTRAP_LAYER_PREFIX = 'bootstrap-';
 
+// ── Persistencia de visibilidad en localStorage ───────────────────────────────
+// Cuando el usuario refresca la página el estado React se pierde.
+// Guardamos { tableName → visible } para restaurar las capas activas al reiniciar.
+const VISIBILITY_STORAGE_KEY = 'sigsobse_layer_visibility';
+
+function readSavedVisibility() {
+  try {
+    const raw = localStorage.getItem(VISIBILITY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSavedVisibility(layers) {
+  try {
+    const snapshot = {};
+    layers.forEach((layer) => {
+      if (layer.databaseLayer && layer.databaseTable) {
+        snapshot[layer.databaseTable] = layer.visible;
+      }
+    });
+    localStorage.setItem(VISIBILITY_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // localStorage no disponible (modo privado, etc.)
+  }
+}
+
 // Estado inicial de los filtros — 'all' significa "sin filtro activo"
 const DEFAULT_FILTERS = {
   dg: 'all',
@@ -646,11 +676,12 @@ function buildDatabaseLayerDefinition({
   return {
     id: layerId,
     name: displayName,
-    // Conserva la visibilidad que tenía si ya existía; las nuevas capas arrancan apagadas.
+    // Conserva la visibilidad del existente; las nuevas capas leen localStorage
+    // para restaurar el estado tras un refresco de página.
     visible:
       typeof existingLayer?.visible === 'boolean'
         ? existingLayer.visible
-        : false,
+        : (readSavedVisibility()[tableName] ?? false),
     color,
     source: 'PostgreSQL',
     dg,
@@ -687,7 +718,7 @@ function buildDatabaseLayerDefinition({
     loadRequested:
       typeof existingLayer?.loadRequested === 'boolean'
         ? existingLayer.loadRequested
-        : false,
+        : (readSavedVisibility()[tableName] ?? false),
   };
 }
 
@@ -843,6 +874,14 @@ export function GISWorkspaceProvider({ children }) {
   // true si estamos en pantalla pequeña O si el usuario activó el modo móvil manualmente
   const isMobileModeActive = isCompactViewport || mobileModeManual;
 
+  // ── Effect: persistir visibilidad de capas en localStorage ───────────────
+  // Se ejecuta cada vez que el array de capas cambia.
+  // Guarda { tableName → visible } para que un refresco de página restaure
+  // las capas que el usuario había activado.
+  React.useEffect(() => {
+    writeSavedVisibility(layers);
+  }, [layers]);
+
   // ── Effect: limpiar foco al entrar en modo móvil ──────────────────────────
   // Antes se apagaban automáticamente todas las capas visibles al entrar en móvil.
   // Eso rompía la experiencia en teléfono porque el usuario perdía contexto y
@@ -892,6 +931,10 @@ export function GISWorkspaceProvider({ children }) {
         const catalog = await fetchLayerTables();
         const tables = Array.isArray(catalog?.tables) ? catalog.tables : [];
 
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[GIS SYNC] Catálogo recibido:', tables.length, 'tablas', tables);
+        }
+
         const geomTables = tables.filter((tableInfo) => {
           const tableName = String(
             tableInfo?.name || tableInfo?.table_name || ''
@@ -901,6 +944,10 @@ export function GISWorkspaceProvider({ children }) {
         const orderedTableNames = geomTables.map((tableInfo) =>
           String(tableInfo?.name || tableInfo?.table_name || '').trim()
         );
+
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[GIS SYNC] Capas con geometría:', orderedTableNames);
+        }
 
         if (cancelled) return;
 
@@ -968,6 +1015,35 @@ export function GISWorkspaceProvider({ children }) {
 
       try {
         const geoJson = await fetchLayerGeoJSON(tableName);
+
+        if (process.env.NODE_ENV !== 'production') {
+          const count = geoJson?.features?.length ?? 0;
+          console.log(`[GIS LOAD] ${tableName}:`, count, 'features');
+
+          // Validación de CRS: muestrear hasta 5 features para verificar coordenadas WGS84
+          if (count > 0) {
+            const sample = geoJson.features.slice(0, 5);
+            let badCoords = 0;
+            sample.forEach((f) => {
+              const coords = f?.geometry?.coordinates;
+              if (!coords) return;
+              const flat = coords.flat(Infinity);
+              for (let i = 0; i < flat.length - 1; i += 2) {
+                const lng = flat[i];
+                const lat = flat[i + 1];
+                if (Math.abs(lng) > 180 || Math.abs(lat) > 90) {
+                  badCoords++;
+                }
+              }
+            });
+            if (badCoords > 0) {
+              console.warn(
+                `[GIS LOAD] ⚠️ ${tableName}: ${badCoords} coordenadas fuera de rango WGS84. ` +
+                '¿La capa está en una proyección diferente (ej. UTM)? Revisa el SRID en PostGIS.'
+              );
+            }
+          }
+        }
 
         if (!geoJson || !Array.isArray(geoJson.features)) {
           throw new Error(`GeoJSON inválido para ${tableName}`);
