@@ -693,6 +693,117 @@ function handleCacheInvalidate(req, res) {
   res.json({ ok: true, message: 'Caché de catálogo invalidado.' });
 }
 
+// ── Búsqueda global en BD ─────────────────────────────────────────────────────
+
+// Nombres de columna (en minúsculas) que se consideran campos de búsqueda.
+// Se comparan contra information_schema.columns.column_name (case-insensitive).
+const SEARCH_FIELD_NAMES = new Set([
+  'nombre_obra', 'obra',
+  'programa',
+  'direccion_general', 'dg',
+  'alcaldia',
+  'colonia',
+  'plantel', 'nombre_plantel',
+  'nombre_sitio_intervenido',
+  'calle', 'direccion',
+  'contrato', 'n_contrato', 'no_contrato',
+  'tipo', 'tipo_obra',
+]);
+
+const SEARCH_MAX_PER_TABLE = 4;
+const SEARCH_MAX_TOTAL    = 30;
+
+// GET /search?q=<término>
+// Busca en todos los campos de texto configurados en SEARCH_FIELD_NAMES a través
+// de todas las tablas con geometría del schema GIS. Devuelve hasta SEARCH_MAX_TOTAL
+// resultados con sus propiedades y un punto representativo (centroide) para
+// centrar el mapa cuando el usuario hace click en un resultado.
+async function handleSearch(req, res) {
+  const q = String(req.query.q || '').trim();
+
+  if (q.length < 2) {
+    res.json({ ok: true, results: [], q });
+    return;
+  }
+
+  try {
+    // Obtener columnas de texto de todo el schema en una sola query
+    const colsResult = await query(
+      `SELECT table_name, column_name
+       FROM information_schema.columns
+       WHERE table_schema = $1
+         AND data_type IN ('text', 'character varying', 'character')
+       ORDER BY table_name, ordinal_position`,
+      [GIS_SCHEMA]
+    );
+
+    // Construir mapa: tableName → [columnas buscables que tiene esta tabla]
+    const searchColsByTable = new Map();
+    colsResult.rows.forEach(({ table_name, column_name }) => {
+      if (!SEARCH_FIELD_NAMES.has(column_name.toLowerCase())) return;
+      if (!searchColsByTable.has(table_name)) searchColsByTable.set(table_name, []);
+      searchColsByTable.get(table_name).push(column_name);
+    });
+
+    // Solo buscar en tablas con geometría Y con al menos un campo buscable
+    const catalog = await getLayerCatalog();
+    const geoTables = catalog.filter(
+      (t) => t.has_geom && t.geometry_column && searchColsByTable.has(t.table_name)
+    );
+
+    // Buscar en cada tabla en paralelo (concurrencia limitada para no saturar la BD)
+    const tableResults = await mapWithConcurrency(
+      geoTables,
+      4,
+      async (table) => {
+        try {
+          const cols = searchColsByTable.get(table.table_name);
+          const safeSchema  = quoteIdentifier(GIS_SCHEMA);
+          const safeTable   = quoteIdentifier(table.table_name);
+          const safeGeom    = quoteIdentifier(table.geometry_column);
+          const whereTerms  = cols
+            .map((c) => `${quoteIdentifier(c)}::text ILIKE '%' || $1 || '%'`)
+            .join(' OR ');
+
+          const result = await query(
+            `SELECT
+               to_jsonb(row_data) - $2   AS properties,
+               ST_AsGeoJSON(
+                 COALESCE(ST_Centroid(${safeGeom}), ${safeGeom})
+               )::jsonb                  AS center_geom
+             FROM ${safeSchema}.${safeTable} AS row_data
+             WHERE ${safeGeom} IS NOT NULL
+               AND ST_IsValid(${safeGeom})
+               AND (${whereTerms})
+             LIMIT $3`,
+            [q, table.geometry_column, SEARCH_MAX_PER_TABLE]
+          );
+
+          return result.rows
+            .filter((row) => row.center_geom)
+            .map((row) => ({
+              table:     table.table_name,
+              layerName: table.table_name,
+              dg:        table.dg || null,
+              properties: row.properties || {},
+              geometry:  row.center_geom,
+            }));
+        } catch {
+          // Tabla sin permisos, corrupción u otro error puntual → ignorar
+          return [];
+        }
+      }
+    );
+
+    const results = tableResults.flat().slice(0, SEARCH_MAX_TOTAL);
+    logBackend(`[GIS API] Búsqueda "${q}": ${results.length} resultados`);
+    res.json({ ok: true, results, q });
+  } catch (error) {
+    logBackendError('[GIS API] Error en búsqueda global', error);
+    res.status(500).json({ ok: false, error: 'Error en búsqueda', results: [] });
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RUTAS DE LA API — registradas en / y en /api (mismo handler, sin duplicar lógica)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -714,11 +825,13 @@ for (const prefix of ['', '/api']) {
   app.get(`${prefix}/test`,              handleTest);
   app.get(`${prefix}/layers`,            handleLayers);
   app.get(`${prefix}/layer/:table`,      handleLayerTable);
+  app.get(`${prefix}/search`,            handleSearch);
   app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
 }
 
 logBackend('[GIS API] Ruta /api/layers disponible');
 logBackend('[GIS API] Ruta /api/layer/:table disponible');
+logBackend('[GIS API] Ruta /api/search disponible');
 
 // Si existe el build del frontend, sirve los assets estáticos ya compilados.
 if (HAS_FRONTEND_BUILD) {

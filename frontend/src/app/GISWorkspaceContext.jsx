@@ -448,6 +448,9 @@ function normalizeDG(value) {
   if (compact.includes('DGOT')) return 'DGOT';
   if (compact.includes('DGPEST')) return 'DGPEST';
   if (compact.includes('DGOIV')) return 'DGOIV';
+  if (compact.includes('ILIFE')) return 'ILIFE';
+  if (compact.includes('DGUV')) return 'DGUV';
+  if (compact.includes('DGAF')) return 'DGAF';
 
   return normalized;
 }

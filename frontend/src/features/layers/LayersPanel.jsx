@@ -3,6 +3,7 @@ import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 import FiltersPanel from '../filters/FiltersPanel';
 import LayerStyleEditor from './LayerStyleEditor';
 import {
+  getLayerDgs,
   getLayerGroupKey,
   getLayerGroupLabel,
   orderLayerGroupEntries,
@@ -147,9 +148,16 @@ function LayersPanel() {
       // Siguen visibles en el mapa — solo se esconden del listado de capas.
       .filter((layer) => !layer.referenceLayer && !layer.isBaseMap)
       .forEach((layer) => {
-        const dg = getLayerGroupKey(layer.dg);
-        if (!groups.has(dg)) groups.set(dg, []);
-        groups.get(dg).push(layer);
+        // getLayerDgs lee todos los DGs únicos de los features de la capa.
+        // Si la capa mezcla DGs (p.ej. DGCOP y DGUV), aparece en ambos grupos.
+        getLayerDgs(layer).forEach((dg) => {
+          const key = getLayerGroupKey(dg);
+          if (!groups.has(key)) groups.set(key, []);
+          const bucket = groups.get(key);
+          if (!bucket.find((l) => l.id === layer.id)) {
+            bucket.push(layer);
+          }
+        });
       });
 
     return orderLayerGroupEntries(Array.from(groups.entries()));

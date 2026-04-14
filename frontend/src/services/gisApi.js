@@ -89,5 +89,12 @@ export function fetchLayerGeoJSON(table) {
   return requestJson(`/layer/${encodeURIComponent(table)}`);
 }
 
+// Busca en todos los campos de texto configurados en el backend (nombre_obra,
+// programa, direccion_general, alcaldia, colonia, etc.) usando ILIKE.
+// Devuelve hasta 30 resultados con propiedades y geometría de punto representativo.
+export function fetchSearch(q) {
+  return requestJson(`/search?q=${encodeURIComponent(String(q || '').trim())}`);
+}
+
 // Exporta la URL base por si algún componente necesita construir URLs manualmente
 export { API_BASE_URL };

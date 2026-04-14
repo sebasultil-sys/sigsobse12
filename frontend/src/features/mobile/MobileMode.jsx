@@ -98,11 +98,17 @@ function MobileMode() {
   if (mobileSheet === 'table')     panelContent = <AttributeTableSheet />;
 
   return (
-    <div
-      className={`mobile-mode${
-        isCompactViewport ? ' is-compact' : ' is-desktop-simulator'
-      }`}
-    >
+  <div
+    className={`mobile-mode${
+      isCompactViewport ? ' is-compact' : ' is-desktop-simulator'
+    }`}
+    style={{
+      width: '100vw',
+      height: '100dvh', // 🔥 ESTE ES EL CAMBIO CLAVE
+      overflow: 'hidden'
+    }}
+  >
+    
       {!isCompactViewport && <div className="mobile-mode__backdrop" />}
 
       <section className="mobile-mode__device">
@@ -125,6 +131,7 @@ function MobileMode() {
         <div className="mobile-mode__map-shell">
           <MapView mode="mobile" />
         </div>
+
 
         {/* TOP BAR — Google Maps style */}
         <header className="mtopbar">

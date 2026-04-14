@@ -59,7 +59,8 @@ function parseNumericValue(value) {
   }
 
   if (typeof value === 'string') {
-    const normalized = value.trim().replace(/,/g, '');
+    // Eliminar coma decimal europea, símbolo % y espacios ("45,5%" → "45.5", "45%" → "45")
+    const normalized = value.trim().replace(/,/g, '.').replace(/%/g, '').replace(/\s/g, '');
     if (!normalized) return null;
 
     const parsed = Number(normalized);

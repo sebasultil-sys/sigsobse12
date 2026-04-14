@@ -1,7 +1,7 @@
 import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 import { getLayerStatus } from '../layers/layerStatus';
-import { getLayerGroupLabel, orderLayerGroupEntries } from '../layers/layerGroups';
+import { getLayerDgs, getLayerGroupLabel, orderLayerGroupEntries } from '../layers/layerGroups';
 import { getLayerIcon } from '../../config/layerIcons';
 
 // Símbolo de geometría de reserva cuando no hay icono personalizado
@@ -77,9 +77,15 @@ function MobileLayersPanel() {
     layers
       .filter((layer) => !layer.referenceLayer && !layer.isBaseMap)
       .forEach((layer) => {
-        const dg = layer.dg || 'Sin DG';
-        if (!map.has(dg)) map.set(dg, []);
-        map.get(dg).push(layer);
+        // getLayerDgs lee todos los DGs únicos de los features de la capa.
+        // Si la capa mezcla DGs (p.ej. DGCOP y DGUV), aparece en ambos grupos.
+        getLayerDgs(layer).forEach((dg) => {
+          if (!map.has(dg)) map.set(dg, []);
+          const bucket = map.get(dg);
+          if (!bucket.find((l) => l.id === layer.id)) {
+            bucket.push(layer);
+          }
+        });
       });
     return orderLayerGroupEntries([...map.entries()]);
   }, [layers]);

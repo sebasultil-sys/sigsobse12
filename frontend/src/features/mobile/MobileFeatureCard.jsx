@@ -319,21 +319,29 @@ function Section({ children, hasContent, title, variant = '' }) {
   );
 }
 
+function getProgressColor(pct) {
+  if (pct === 100) return '#16a34a'; // verde — terminado
+  if (pct > 70)   return '#eab308'; // amarillo — avance alto
+  if (pct > 30)   return '#f97316'; // naranja — en proceso
+  return '#dc2626';                  // rojo — inicio o sin avance
+}
+
 function ProgressBar({ value }) {
   if (!Number.isFinite(value)) return null;
 
-  const pct = Math.min(100, Math.max(0, value));
+  const pct   = Math.min(100, Math.max(0, value));
+  const color = getProgressColor(pct);
 
   return (
     <div className="avance-box">
       <div className="avance-box__header">
         <span>Avance</span>
-        <strong>{formatPercent(value)}</strong>
+        <strong style={{ color }}>{formatPercent(value)}</strong>
       </div>
       <div className="avance-box__barra">
         <div
           className="avance-box__fill"
-          style={{ width: `${pct}%` }}
+          style={{ width: `${pct}%`, background: color }}
         />
       </div>
     </div>
