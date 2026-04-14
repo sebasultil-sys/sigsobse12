@@ -10,7 +10,7 @@ function WorkspaceHeader({
       <div className="workspace-header__brand">
         <div className="workspace-header__logo-wrap" aria-hidden="true">
           <img
-            src="/web/assets/img/corazon-snfondo.png"
+            src={process.env.PUBLIC_URL + "/assets/img/nuevologoSinfondo.png"}
             alt="SOBSE"
             className="workspace-header__logo-img"
             onError={(e) => {

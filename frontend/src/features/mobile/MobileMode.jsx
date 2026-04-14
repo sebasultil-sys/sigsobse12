@@ -88,9 +88,8 @@ function MobileMode() {
             <img
               alt=""
               className="mobile-splash__logo"
-              src="/files/web/assets/img/corazon-snfondo.png"
+              src={process.env.PUBLIC_URL + "/assets/img/sinfondo.png"}
             />
-            <span className="mobile-splash__title">SIG SOBSE</span>
             <span className="mobile-splash__subtitle">Visor de obra pública</span>
             <div className="mobile-splash__dots">
               <span className="mobile-splash__dot" />
@@ -112,10 +111,9 @@ function MobileMode() {
               alt="Logo SOBSE"
               className="mtopbar__logo"
               onError={(e) => { e.currentTarget.style.display = 'none'; }}
-              src="/files/web/assets/img/corazon-snfondo.png"
+              src={process.env.PUBLIC_URL + "/assets/img/nuevologoSinfondo.png"}
             />
-            <span>SIG</span>
-            <strong>SOBSE</strong>
+            
           </div>
 
           {mobileSheet !== 'search' && (

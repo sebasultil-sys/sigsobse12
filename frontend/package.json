@@ -2,12 +2,17 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
+   "homepage": "/web/sandbox/PRUEBAS/Visualizador_Web2",
+
+
   "dependencies": {
     "cra-template-pwa": "2.0.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-scripts": "5.0.1",
     "web-vitals": "^5.2.0"
+
+
   },
   "scripts": {
     "start": "react-scripts start",

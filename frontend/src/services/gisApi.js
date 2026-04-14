@@ -45,11 +45,18 @@ function resolveApiBaseUrl() {
 // 4) En producción usa el mismo origen del sitio.
 const API_BASE_URL = resolveApiBaseUrl();
 
+if (process.env.NODE_ENV !== 'production') {
+  console.log('[GIS API] API_BASE_URL:', API_BASE_URL);
+}
+
 // ─── Función interna helper ───────────────────────────────────────────────────
 // Hace fetch a cualquier ruta del backend y devuelve el JSON parseado.
 // Si el servidor responde con un código de error (4xx, 5xx), lanza una
 // excepción con el mensaje de error que manda el servidor.
 async function requestJson(path) {
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[GIS API] Fetching:', `${API_BASE_URL}${path}`);
+  }
   const response = await fetch(`${API_BASE_URL}${path}`);
   const payload = await response.json();
 

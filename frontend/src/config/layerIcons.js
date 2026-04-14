@@ -8,51 +8,59 @@
 
 export const layerIcons = {
   // Transporte
-  'CABLEBUS':      '/icons/cablebus.png',
-  'CABLEBÚS':      '/icons/cablebus.png',
-  'TREN LIGERO':   '/icons/tren.png',
-  'TREN':          '/icons/tren.png',
-  'TROLEBUS':      '/icons/trolebus.png',
-  'TROLEBÚS':      '/icons/trolebus.png',
-  'METRO':         '/icons/metro.png',
-  'METROBUS':      '/icons/metrobus.png',
-  'METROBÚS':      '/icons/metrobus.png',
-  'ECOBICI':       '/icons/ecobici.png',
+  'CABLEBUS':      '/logos/airbss.png',
+  'CABLEBÚS':      '/logos/airbss.png',
+  'TREN LIGERO':   '/logos/TREN_LIGERO.png',
+  'TREN':          '/logos/TREN_LIGERO.png',
+  'TROLEBUS':      '/logos/TROLEBUS.png',
+  'TROLEBÚS':      '/logos/TROLEBUS.png',
+  'METRO':         '/logos/axosobse.png',
+  'METROBUS':      '/logos/axosobse.png',
+  'METROBÚS':      '/logos/axosobse.png',
+  'ECOBICI':       '/logos/BICIESTACIONAMIENTO.png',
 
   // Educación
-  'ESCUELA':       '/icons/escuela.png',
-  'COLEGIO':       '/icons/escuela.png',
-  'PLANTEL':       '/icons/escuela.png',
-  'CETRAM':        '/icons/cetram.png',
-
-  // Salud
-  'HOSPITAL':      '/icons/hospital.png',
-  'CLINICA':       '/icons/hospital.png',
-  'CLÍNICA':       '/icons/hospital.png',
-  'UNIDAD MEDICA': '/icons/hospital.png',
-  'UNIDAD MÉDICA': '/icons/hospital.png',
-  'ERUM':          '/icons/ambulancia.png',
-  'AMBULANCIA':    '/icons/ambulancia.png',
+  'ESCUELA':       '/logos/ESCUELAS.png',
+  'COLEGIO':       '/logos/ESCUELAS.png',
+  'PLANTEL':       '/logos/ESCUELAS.png',
+  '1, 2, 3':       '/logos/1_2_3_PORMIESCUELA.png',
+  '123':           '/logos/1_2_3_PORMIESCUELA.png',
 
   // Equipamiento urbano
-  'UTOPIA':        '/icons/utopias.png',
-  'UTOPÍA':        '/icons/utopias.png',
-  'PARQUE':        '/icons/parque.png',
-  'JARDIN':        '/icons/parque.png',
-  'JARDÍN':        '/icons/parque.png',
-  'MERCADO':       '/icons/mercado.png',
-  'DEPORTIVO':     '/icons/deportivo.png',
+  'UTOPIA':        '/logos/utopiaaaa.png',
+  'UTOPÍA':        '/logos/utopiaaaa.png',
+  'PARQUE':        '/logos/parques_alegria.png',
+  'JARDIN':        '/logos/parques_alegria.png',
+  'JARDÍN':        '/logos/parques_alegria.png',
+  'MERCADO':       '/logos/MERCADO_HUIPUICO.png',
+  'DEPORTIVO':     '/logos/CANCHAS_FUTBOL.png',
+  'CANCHAS':       '/logos/CANCHAS_FUTBOL.png',
+  'PILARES':       '/logos/pilares.png',
+  'ALDEA':         '/logos/ALDEA_JUVENI.png',
+  'ALBERGUE':      '/logos/ALBERGUES.png',
+  'CAMINO':        '/logos/CAMINO_SEGUR.png',
+  'COMUNIDAD':     '/logos/COMUNIDAD_SEGUR.png',
+  'ILUMINACION':   '/logos/Ciudad_iluminada.png',
+  'ILUMINACIÓN':   '/logos/Ciudad_iluminada.png',
+  'BAJO PUENTE':   '/logos/BAJO_PUENTE.png',
+  'BICIESTACION':  '/logos/BICIESTACIONAMIENTO.png',
 
   // Obra pública
-  'OBRA':          '/icons/obra.png',
-  'BACHEO':        '/icons/obra.png',
-  'PUENTE':        '/icons/puente.png',
-  'CICLOVÍA':      '/icons/ciclovia.png',
-  'CICLOVIA':      '/icons/ciclovia.png',
+  'PUENTE PEATONAL': '/logos/PUENTE_PEATONAL.png',
+  'PUENTE VEHIC':    '/logos/puentes_vehicular.png',
+  'PUENTE':          '/logos/PUENTE_PEATONAL.png',
+  'CICLOVÍA':        '/logos/ciclovia.png',
+  'CICLOVIA':        '/logos/ciclovia.png',
+
+  // Seguridad / Gobierno
+  'POLICIA':       '/logos/policialogo.png',
+  'POLICÍA':       '/logos/policialogo.png',
+  'ANAHUAC':       '/logos/ANAHUA.png',
+  'ERUM':          '/logos/AGENCIA_EMPLE.png',
 };
 
 // Icono por defecto cuando no hay coincidencia
-export const DEFAULT_ICON_URL = '/icons/default.png';
+export const DEFAULT_ICON_URL = null;
 
 /**
  * Devuelve la URL del icono para una capa dada su nombre.
@@ -67,5 +75,7 @@ export function getLayerIcon(name) {
   if (!name) return null;
   const upper = name.toUpperCase();
   const key = Object.keys(layerIcons).find((k) => upper.includes(k.toUpperCase()));
-  return key ? layerIcons[key] : null;
+  if (!key) return null;
+  const path = layerIcons[key];
+  return path ? (process.env.PUBLIC_URL || '') + path : null;
 }

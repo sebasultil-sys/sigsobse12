@@ -38,12 +38,6 @@ const ENABLE_BACKEND_DEBUG =
 const CACHE_INVALIDATE_TOKEN = String(
   process.env.CACHE_INVALIDATE_TOKEN || ''
 ).trim();
-const CORS_ALLOWED_ORIGINS = String(
-  process.env.CORS_ALLOWED_ORIGINS || ''
-)
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
 const SERVE_FRONTEND =
   String(process.env.SERVE_FRONTEND || 'true').toLowerCase() !== 'false';
 const FRONTEND_BUILD_DIR = path.resolve(__dirname, '../frontend/build');
@@ -57,57 +51,10 @@ const HAS_FRONTEND_BUILD =
 // Reduce el tamaño del JSON hasta un 70-80% → capas cargan mucho más rápido.
 app.use(compression());
 
-// cors() queda abierto en desarrollo para facilitar pruebas locales.
-// En producción solo permite:
-//   - requests sin Origin (curl, healthchecks)
-//   - el mismo host que sirve la app
-//   - origins explícitos en CORS_ALLOWED_ORIGINS
-app.use(
-  cors((req, callback) => {
-    const requestOrigin = String(req.get('Origin') || '').trim();
-
-    if (!requestOrigin) {
-      callback(null, { origin: false });
-      return;
-    }
-
-    if (!IS_PRODUCTION) {
-      callback(null, { origin: true, credentials: true });
-      return;
-    }
-
-    let isSameHost = false;
-
-    try {
-      const originUrl = new URL(requestOrigin);
-      isSameHost = originUrl.host === String(req.get('host') || '').trim();
-    } catch {
-      isSameHost = false;
-    }
-
-    if (isSameHost || CORS_ALLOWED_ORIGINS.includes(requestOrigin)) {
-      callback(null, { origin: true, credentials: true });
-      return;
-    }
-
-    callback(new Error('Origin no permitido por CORS.'));
-  })
-);
+// CORS abierto — el frontend en Hostinger y el backend en Render son dominios distintos.
+app.use(cors({ origin: '*' }));
 
 app.use(express.json());
-
-app.use((error, req, res, next) => {
-  if (error?.message === 'Origin no permitido por CORS.') {
-    logBackendError('[GIS API] Origin bloqueado por CORS:', req.get('Origin'));
-    res.status(403).json({
-      ok: false,
-      error: 'Origin no permitido por CORS.',
-    });
-    return;
-  }
-
-  next(error);
-});
 
 // ── Caché en memoria del catálogo de tablas ───────────────────────────────────
 // Escanear information_schema cada vez que alguien pide una capa es lento.
@@ -192,7 +139,7 @@ function getServiceStatus() {
 }
 
 function isApiLikePath(requestPath) {
-  return /^\/(test|layers|layer(?:\/|$)|cache(?:\/|$)|health(?:\/|$))/.test(
+  return /^\/(api(?:\/|$)|test|layers|layer(?:\/|$)|cache(?:\/|$)|health(?:\/|$))/.test(
     requestPath
   );
 }
@@ -629,30 +576,14 @@ async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RUTAS DE LA API
+// HANDLERS — funciones reutilizables para registrar en / y /api
 // ─────────────────────────────────────────────────────────────────────────────
 
-// GET /health → estado del backend
-// Mantiene una ruta explícita de salud aunque "/" sirva el frontend en producción.
-app.get('/health', (req, res) => {
+function handleHealth(_req, res) {
   res.json(getServiceStatus());
-});
+}
 
-// GET / → si existe build del frontend, sirve la app React.
-// Si no existe, responde el estado del backend como fallback operativo.
-app.get('/', (req, res) => {
-  if (HAS_FRONTEND_BUILD) {
-    res.sendFile(FRONTEND_INDEX_FILE);
-    return;
-  }
-
-  res.json(getServiceStatus());
-});
-
-// GET /test → prueba de conexión a PostgreSQL
-// Ejecuta SELECT NOW() y devuelve la hora del servidor.
-// Si falla, significa que PostgreSQL no está disponible.
-app.get('/test', async (req, res) => {
+async function handleTest(_req, res) {
   try {
     const result = await query('SELECT NOW() AS server_time');
     res.json({
@@ -661,17 +592,11 @@ app.get('/test', async (req, res) => {
       rows: result.rows,
     });
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
+    res.status(500).json({ ok: false, error: error.message });
   }
-});
+}
 
-// GET /layers → catálogo de todas las tablas del schema
-// El frontend llama esto primero para saber qué capas existen.
-// Cache-Control: 60 segundos en el navegador para evitar peticiones repetidas.
-app.get('/layers', async (req, res) => {
+async function handleLayers(_req, res) {
   try {
     const catalog = await getLayerCatalog();
     const tables = catalog.map((table) => ({
@@ -686,7 +611,6 @@ app.get('/layers', async (req, res) => {
       dg: table.dg,
     }));
 
-    // Permite al navegador cachear este response hasta 60 segundos
     res.set('Cache-Control', 'public, max-age=60');
     res.json({
       ok: true,
@@ -695,31 +619,19 @@ app.get('/layers', async (req, res) => {
       total: tables.length,
     });
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
+    res.status(500).json({ ok: false, error: error.message });
   }
-});
+}
 
-// GET /layer/:table → GeoJSON de una tabla específica
-// El frontend llama esto una vez por cada capa para obtener sus geometrías.
-// :table es el nombre de la tabla en PostgreSQL (viene URL-encoded desde el frontend).
-// Cache-Control: 120 segundos porque los datos de obra no cambian en tiempo real.
-app.get('/layer/:table', async (req, res) => {
+async function handleLayerTable(req, res) {
   const tableName = String(req.params.table || '').trim();
 
   if (!tableName) {
-    res.status(400).json({
-      ok: false,
-      error: 'Nombre de tabla inválido.',
-    });
+    res.status(400).json({ ok: false, error: 'Nombre de tabla inválido.' });
     return;
   }
 
   try {
-    // Validación directa: consulta solo las columnas de ESTA tabla.
-    // Mucho más rápido que getLayerCatalog() que escanea todo el schema.
     const metadata = await getTableMeta(tableName);
 
     if (!metadata) {
@@ -730,7 +642,6 @@ app.get('/layer/:table', async (req, res) => {
       return;
     }
 
-    // La tabla existe pero no tiene columna geom → no se puede servir como capa GIS
     if (!metadata.has_geom || !metadata.geometry_column) {
       logBackend(
         `[GIS API] Tabla "${GIS_SCHEMA}"."${tableName}" encontrada sin columna geom geometry`
@@ -747,22 +658,15 @@ app.get('/layer/:table', async (req, res) => {
       metadata.geometry_column
     );
 
-    // Permite al navegador cachear el GeoJSON 2 minutos
     res.set('Cache-Control', 'public, max-age=120');
     res.set('X-GIS-Cache', cacheStatus);
     res.json(geojson);
   } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message,
-    });
+    res.status(500).json({ ok: false, error: error.message });
   }
-});
+}
 
-// POST /cache/invalidate → borra el caché del catálogo
-// Útil cuando se agregan tablas nuevas al schema y se quiere que el sistema
-// las detecte sin esperar los 5 minutos del TTL automático.
-app.post('/cache/invalidate', (req, res) => {
+function handleCacheInvalidate(req, res) {
   if (IS_PRODUCTION && !CACHE_INVALIDATE_TOKEN) {
     logBackendError(
       '[GIS API] Intento de invalidar caché bloqueado: CACHE_INVALIDATE_TOKEN no configurado en producción'
@@ -777,13 +681,8 @@ app.post('/cache/invalidate', (req, res) => {
   if (CACHE_INVALIDATE_TOKEN) {
     const requestToken = getInvalidateRequestToken(req);
     if (requestToken !== CACHE_INVALIDATE_TOKEN) {
-      logBackendError(
-        '[GIS API] Intento no autorizado de invalidar caché'
-      );
-      res.status(401).json({
-        ok: false,
-        error: 'No autorizado para invalidar caché.',
-      });
+      logBackendError('[GIS API] Intento no autorizado de invalidar caché');
+      res.status(401).json({ ok: false, error: 'No autorizado para invalidar caché.' });
       return;
     }
   }
@@ -792,7 +691,34 @@ app.post('/cache/invalidate', (req, res) => {
   invalidateLayerGeoJsonCache();
   logBackend('[GIS API] Caché de catálogo invalidado manualmente');
   res.json({ ok: true, message: 'Caché de catálogo invalidado.' });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RUTAS DE LA API — registradas en / y en /api (mismo handler, sin duplicar lógica)
+// ─────────────────────────────────────────────────────────────────────────────
+
+logBackend('[GIS API] Backend activo — rutas disponibles en / y /api');
+
+// GET / → sirve frontend o estado del backend
+app.get('/', (_req, res) => {
+  if (HAS_FRONTEND_BUILD) {
+    res.sendFile(FRONTEND_INDEX_FILE);
+    return;
+  }
+  res.json(getServiceStatus());
 });
+
+// Rutas montadas en ambos prefijos (/ y /api)
+for (const prefix of ['', '/api']) {
+  app.get(`${prefix}/health`,            handleHealth);
+  app.get(`${prefix}/test`,              handleTest);
+  app.get(`${prefix}/layers`,            handleLayers);
+  app.get(`${prefix}/layer/:table`,      handleLayerTable);
+  app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
+}
+
+logBackend('[GIS API] Ruta /api/layers disponible');
+logBackend('[GIS API] Ruta /api/layer/:table disponible');
 
 // Si existe el build del frontend, sirve los assets estáticos ya compilados.
 if (HAS_FRONTEND_BUILD) {

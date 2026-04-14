@@ -1,6 +1,6 @@
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 
-const SEARCH_LOGO_SRC = '/files/web/assets/img/corazon-snfondo.png';
+const SEARCH_LOGO_SRC = process.env.PUBLIC_URL + '/assets/img/nuevologoSinfondo.png';
 
 function FilterSelect({ label, options, value, onChange }) {
   return (
