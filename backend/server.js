@@ -994,7 +994,9 @@ async function getKpiSummaryCatalog() {
     (table) =>
       table?.has_geom &&
       isOperationalDg(table?.dg) &&
-      isPointGeometryType(table?.geometry_type)
+      // Si geometry_type no está disponible (fallback sin geometry_columns),
+      // no descartamos la tabla; solo exigimos POINT cuando el tipo viene explícito.
+      (!table?.geometry_type || isPointGeometryType(table?.geometry_type))
   );
 
   const tableCandidates = targetTables.map((table) => {
