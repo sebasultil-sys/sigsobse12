@@ -1474,98 +1474,6 @@ async function handleTest(_req, res) {
   }
 }
 
-async function handleSearch(req, res) {
-  const queryParam = String(req.query.q || "").trim();
-  if (!queryParam) {
-    res
-      .status(400)
-      .json({ ok: false, error: 'Parámetro de búsqueda "q" requerido.' });
-    return;
-  }
-
-  try {
-    // Get all tables with geometry
-    const tablesResult = await query(
-      `
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = $1
-          AND table_type = 'BASE TABLE'
-      `,
-      [GIS_SCHEMA],
-    );
-
-    const searchResults = { obras: [], programas: [], capas: [] };
-    const searchTerm = `%${queryParam}%`;
-
-    for (const { table_name } of tablesResult.rows) {
-      const safeTable = quoteIdentifier(table_name);
-
-      // Search in nombre_obra, programa, direccion_general, alcaldia, colonia
-      const searchQuery = `
-        SELECT
-          ${safeTable}.*,
-          ST_AsGeoJSON(geom) AS geometry_geojson
-        FROM ${quoteIdentifier(GIS_SCHEMA)}.${safeTable}
-        WHERE
-          ("NOMBRE DEL SITIO INTERVENIDO" ILIKE $1 OR
-           "PROGRAMA" ILIKE $1 OR
-           "DIRECCION GENERAL" ILIKE $1 OR
-           "ALCALDIA" ILIKE $1 OR
-           "COLONIA" ILIKE $1 OR
-           "CALLE" ILIKE $1)
-          AND geom IS NOT NULL
-        LIMIT 50
-      `;
-
-      try {
-        const result = await query(searchQuery, [searchTerm]);
-
-        result.rows.forEach((row) => {
-          const feature = {
-            type: "Feature",
-            geometry: row.geometry_geojson
-              ? JSON.parse(row.geometry_geojson)
-              : null,
-            properties: { ...row, geometry_geojson: undefined },
-            table_name,
-          };
-
-          // Categorize results
-          if (
-            row.nombre_obra &&
-            row.nombre_obra.toLowerCase().includes(queryParam.toLowerCase())
-          ) {
-            searchResults.obras.push(feature);
-          }
-          if (
-            row.programa &&
-            row.programa.toLowerCase().includes(queryParam.toLowerCase())
-          ) {
-            searchResults.programas.push(feature);
-          }
-          // Capas would be the table names themselves, but for now we'll add all
-          if (!searchResults.capas.find((c) => c.table_name === table_name)) {
-            searchResults.capas.push({ table_name, name: table_name });
-          }
-        });
-      } catch (tableError) {
-        // Skip tables that don't have the expected columns
-        logBackend(`Skipping table ${table_name}: ${tableError.message}`);
-      }
-    }
-
-    res.json({
-      ok: true,
-      message: `Búsqueda completada para "${queryParam}"`,
-      results: searchResults,
-      total: searchResults.obras.length + searchResults.programas.length,
-    });
-  } catch (error) {
-    res.status(500).json({ ok: false, error: error.message });
-  }
-}
-
 async function handleLayers(req, res) {
   try {
     const catalog = await getLayerCatalog();
@@ -1955,20 +1863,6 @@ app.get("/", (_req, res) => {
 });
 
 // Rutas montadas en ambos prefijos (/ y /api)
-<<<<<<< Updated upstream
-for (const prefix of ['', '/api']) {
-  app.get(`${prefix}/health`,            handleHealth);
-  app.get(`${prefix}/test`,              handleTest);
-  app.get(`${prefix}/layers`,            handleLayers);
-  app.get(`${prefix}/layer/:table`,      handleLayerTable);
-  app.get(`${prefix}/search`,            handleSearch);
-  app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
-}
-
-logBackend('[GIS API] Ruta /api/layers disponible');
-logBackend('[GIS API] Ruta /api/layer/:table disponible');
-logBackend('[GIS API] Ruta /api/search disponible');
-=======
 for (const prefix of ["", "/api"]) {
   app.get(`${prefix}/health`, handleHealth);
   app.get(`${prefix}/test`, handleTest);
@@ -1990,6 +1884,7 @@ logBackend("[GIS API] Ruta /api/kpi/summary disponible");
 logBackend("[GIS API] Ruta /api/kpis/audit disponible");
 logBackend("[GIS API] Ruta /api/kpis/summary disponible");
 logBackend("[GIS API] Ruta /api/population/query disponible");
+logBackend("[GIS API] Ruta /api/search disponible");
 
 populationAnalysisEngine
   .ensureLoaded()
@@ -2005,7 +1900,6 @@ populationAnalysisEngine
       error?.message || error,
     );
   });
->>>>>>> Stashed changes
 
 // Si existe el build del frontend, sirve los assets estáticos ya compilados.
 if (HAS_FRONTEND_BUILD) {
