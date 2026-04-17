@@ -1013,11 +1013,13 @@ async function getKpiSummaryCatalog() {
       table,
       statusColumn: statusColumn || null,
       workIdColumn: workIdColumn || null,
-      includeInTotals: Boolean(tableName && workIdColumn),
+      // Incluimos tablas con ID de obra o, al menos, con columna de estatus.
+      // Cuando no hay ID, se contabilizan por suma de filas de la tabla.
+      includeInTotals: Boolean(tableName && (workIdColumn || statusColumn)),
       skipReason: !tableName
         ? "table_name_vacio"
-        : !workIdColumn
-          ? "sin_columna_id_obra"
+        : !workIdColumn && !statusColumn
+          ? "sin_columna_id_obra_y_sin_estatus"
           : null,
     };
   });
@@ -1084,7 +1086,20 @@ async function getKpiSummaryCatalog() {
     targetTables,
     columnsByTable
   );
-  const totals = globalDistinctTotals || fallbackSummedTotals;
+  const includedWithWorkIdCount = includedTableCandidates.filter(
+    (candidate) => Boolean(candidate.workIdColumn)
+  ).length;
+  const workIdCoverageRatio = targetTables.length
+    ? includedWithWorkIdCount / targetTables.length
+    : 0;
+  const useGlobalDistinctTotals = Boolean(
+    globalDistinctTotals &&
+    includedWithWorkIdCount >= 2 &&
+    workIdCoverageRatio >= 0.35
+  );
+  const totals = useGlobalDistinctTotals
+    ? globalDistinctTotals
+    : fallbackSummedTotals;
   const skippedTables = tableCandidates
     .filter((candidate) => !candidate.includeInTotals)
     .map((candidate) => ({
@@ -1104,8 +1119,12 @@ async function getKpiSummaryCatalog() {
     audit: {
       target_tables: targetTables.length,
       included_tables: includedTableCandidates.length,
+      included_tables_with_work_id: includedWithWorkIdCount,
+      work_id_coverage_ratio: Number(workIdCoverageRatio.toFixed(4)),
       skipped_tables: skippedTables,
-      totals_strategy: globalDistinctTotals ? "global_distinct" : "table_sum_fallback",
+      totals_strategy: useGlobalDistinctTotals
+        ? "global_distinct"
+        : "table_sum_fallback",
       totals_from_table_sum: fallbackSummedTotals,
       totals_from_global_distinct: globalDistinctTotals,
     },
