@@ -297,9 +297,58 @@ function parseJsonOrNull(value) {
   return null;
 }
 
+function collectCoordinatePairs(coordinates, pairs = []) {
+  if (!Array.isArray(coordinates)) return pairs;
+
+  if (
+    coordinates.length >= 2 &&
+    !Array.isArray(coordinates[0]) &&
+    !Array.isArray(coordinates[1])
+  ) {
+    pairs.push([coordinates[0], coordinates[1]]);
+    return pairs;
+  }
+
+  coordinates.forEach((entry) => collectCoordinatePairs(entry, pairs));
+  return pairs;
+}
+
+function isValidLngLatPair(pair) {
+  const lng = Number(pair?.[0]);
+  const lat = Number(pair?.[1]);
+
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return false;
+  if (Math.abs(lng) <= 1e-9 && Math.abs(lat) <= 1e-9) return false; // Null Island (0,0)
+  if (lng < -180 || lng > 180) return false;
+  if (lat < -90 || lat > 90) return false;
+  return true;
+}
+
+function hasValidWgs84Geometry(geometry) {
+  if (!geometry || typeof geometry !== "object") return false;
+
+  if (geometry.type === "GeometryCollection") {
+    const geometries = Array.isArray(geometry.geometries) ? geometry.geometries : [];
+    if (!geometries.length) return false;
+    return geometries.every((entry) => hasValidWgs84Geometry(entry));
+  }
+
+  const coordinatePairs = collectCoordinatePairs(geometry.coordinates, []);
+  if (!coordinatePairs.length) return false;
+  return coordinatePairs.every((pair) => isValidLngLatPair(pair));
+}
+
 function buildGeoJsonFeatureFromRow(row, geometryColumn) {
-  const properties = { ...row };
+  const hasStructuredProperties =
+    row?.properties &&
+    typeof row.properties === "object" &&
+    !Array.isArray(row.properties);
+  const properties = hasStructuredProperties ? { ...row.properties } : { ...row };
   let geometry = null;
+
+  if (row?.geometry_geojson !== undefined) {
+    geometry = parseJsonOrNull(row.geometry_geojson);
+  }
 
   if (properties.geometry !== undefined) {
     geometry = parseJsonOrNull(properties.geometry);
@@ -322,6 +371,10 @@ function buildGeoJsonFeatureFromRow(row, geometryColumn) {
         coordinates: [x, y],
       };
     }
+  }
+
+  if (geometry && !hasValidWgs84Geometry(geometry)) {
+    geometry = null;
   }
 
   if (geometryColumn) {
@@ -1588,6 +1641,13 @@ async function getPostgisLayerGeoJson(tableName, geometryColumn) {
   const safeTable = quoteIdentifier(tableName);
   const safeGeomColumn = geometryColumn ? quoteIdentifier(geometryColumn) : null;
   const tolerance = getSimplifyTolerance(tableName);
+  const normalizedGeomSql = `
+    CASE
+      WHEN COALESCE(ST_SRID(${safeGeomColumn}), 0) = 4326 THEN ${safeGeomColumn}
+      WHEN COALESCE(ST_SRID(${safeGeomColumn}), 0) > 0 THEN ST_Transform(${safeGeomColumn}, 4326)
+      ELSE ${safeGeomColumn}
+    END
+  `;
 
   logBackend(
     `[GIS API] Consultando capa GeoJSON desde "${GIS_SCHEMA}"."${tableName}" (tolerance=${tolerance})`,
@@ -1595,15 +1655,17 @@ async function getPostgisLayerGeoJson(tableName, geometryColumn) {
 
   const result = await query(
     `
-      SELECT row_data.*,
+      SELECT
+        (to_jsonb(row_data) - ($2::text) - 'geometry' - 'geom' - 'the_geom') AS properties,
         ST_AsGeoJSON(
-          ST_Simplify(${safeGeomColumn}, $2, true)
+          ST_Simplify(${normalizedGeomSql}, ($1::double precision), true)
         ) AS geometry_geojson
       FROM ${safeSchema}.${safeTable} AS row_data
       WHERE ${safeGeomColumn} IS NOT NULL
         AND ST_IsValid(${safeGeomColumn})
+        AND NOT ST_IsEmpty(${safeGeomColumn})
     `,
-    [geometryColumn, tolerance],
+    [tolerance, geometryColumn],
   );
 
   return buildGeoJsonFeatureCollection(result.rows, geometryColumn);
