@@ -633,6 +633,24 @@ const GENERIC_WORK_ID_COLUMN_CANDIDATES = [
 const ALLOW_GENERIC_WORK_ID_COLUMNS =
   String(process.env.GIS_ALLOW_GENERIC_WORK_ID_COLUMNS || "").toLowerCase() ===
   "true";
+const DEFAULT_KPI_CANONICAL_KEY_COLUMNS = [
+  "ID OBRA",
+  "DIRECCION GENERAL",
+  "PROGRAMA",
+  "ALCALDIA",
+];
+const KPI_CANONICAL_SOURCE_ENABLED =
+  String(process.env.GIS_KPI_CANONICAL_SOURCE_ENABLED || "true").toLowerCase() !==
+  "false";
+const KPI_CANONICAL_TABLE = String(
+  process.env.GIS_KPI_CANONICAL_TABLE || "obras_centralizadas",
+).trim();
+const KPI_CANONICAL_KEY_COLUMNS = String(
+  process.env.GIS_KPI_CANONICAL_KEY_COLUMNS || "",
+)
+  .split(",")
+  .map((columnName) => String(columnName || "").trim())
+  .filter(Boolean);
 
 function findColumnByCandidates(columns, candidates) {
   const candidateRank = new Map(
@@ -670,6 +688,43 @@ function resolveWorkIdColumn(columns) {
     columns,
     GENERIC_WORK_ID_COLUMN_CANDIDATES,
   )?.column_name;
+}
+
+function pickCanonicalKeyColumns(columns) {
+  if (!Array.isArray(columns) || !columns.length) return [];
+
+  const preferredColumns = KPI_CANONICAL_KEY_COLUMNS.length
+    ? KPI_CANONICAL_KEY_COLUMNS
+    : DEFAULT_KPI_CANONICAL_KEY_COLUMNS;
+  const normalizedToColumn = new Map();
+  columns.forEach((column) => {
+    const columnName = String(column?.column_name || "").trim();
+    if (!columnName) return;
+    const normalized = normalizeCatalogKey(columnName);
+    if (!normalized || normalizedToColumn.has(normalized)) return;
+    normalizedToColumn.set(normalized, columnName);
+  });
+
+  const pickedColumns = [];
+  preferredColumns.forEach((candidate) => {
+    const normalizedCandidate = normalizeCatalogKey(candidate);
+    const existingColumn = normalizedToColumn.get(normalizedCandidate);
+    if (!existingColumn) return;
+    if (pickedColumns.includes(existingColumn)) return;
+    pickedColumns.push(existingColumn);
+  });
+
+  return pickedColumns;
+}
+
+function buildCanonicalCompositeKeySql(keyColumns) {
+  if (!Array.isArray(keyColumns) || !keyColumns.length) return "NULL";
+  const normalizedParts = keyColumns.map((columnName) => {
+    const safeColumn = quoteIdentifier(columnName);
+    return `REGEXP_REPLACE(UPPER(BTRIM(COALESCE(${safeColumn}::text, ''))), '[^A-Z0-9]', '', 'g')`;
+  });
+
+  return `NULLIF(CONCAT_WS('|', ${normalizedParts.join(", ")}), '')`;
 }
 
 function buildEmptyStatusCounters() {
@@ -975,6 +1030,106 @@ async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
   };
 }
 
+async function getCanonicalKpiSummary(columnsByTable) {
+  if (!KPI_CANONICAL_SOURCE_ENABLED) return null;
+  if (!KPI_CANONICAL_TABLE) return null;
+
+  const tableName = KPI_CANONICAL_TABLE;
+  const columns = columnsByTable.get(tableName) || [];
+  if (!columns.length) return null;
+
+  const statusColumn = findColumnByCandidates(
+    columns,
+    STATUS_COLUMN_CANDIDATES,
+  )?.column_name;
+  if (!statusColumn) return null;
+
+  const keyColumns = pickCanonicalKeyColumns(columns);
+  if (!keyColumns.length) return null;
+
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const safeTable = quoteIdentifier(tableName);
+  const safeStatusColumn = quoteIdentifier(statusColumn);
+  const statusCaseSql = buildStatusKeyCaseSql(safeStatusColumn);
+  const compositeKeySql = buildCanonicalCompositeKeySql(keyColumns);
+
+  const result = await query(`
+    WITH normalized AS (
+      SELECT
+        ${compositeKeySql} AS work_key,
+        ${statusCaseSql} AS status_key
+      FROM ${safeSchema}.${safeTable}
+    ),
+    ranked AS (
+      SELECT
+        work_key,
+        MAX(
+          CASE
+            WHEN status_key = 'entregado' THEN 4
+            WHEN status_key = 'terminado' THEN 3
+            WHEN status_key = 'proceso' THEN 2
+            WHEN status_key = 'sin_iniciar' THEN 1
+            ELSE 0
+          END
+        ) AS status_rank
+      FROM normalized
+      WHERE work_key IS NOT NULL
+      GROUP BY work_key
+    )
+    SELECT
+      COUNT(*)::bigint AS total_obras,
+      COUNT(*) FILTER (WHERE status_rank = 4)::bigint AS entregadas,
+      COUNT(*) FILTER (WHERE status_rank = 3)::bigint AS terminadas,
+      COUNT(*) FILTER (WHERE status_rank = 2)::bigint AS en_proceso,
+      COUNT(*) FILTER (WHERE status_rank = 1)::bigint AS sin_iniciar,
+      COUNT(*) FILTER (WHERE status_rank = 0)::bigint AS otro
+    FROM ranked
+  `);
+
+  const row = result.rows[0] || {};
+  const totals = {
+    total_obras: Number(row.total_obras || 0),
+    entregadas: Number(row.entregadas || 0),
+    terminadas: Number(row.terminadas || 0),
+    en_proceso: Number(row.en_proceso || 0),
+    sin_iniciar: Number(row.sin_iniciar || 0),
+    otro: Number(row.otro || 0),
+  };
+
+  return {
+    generated_at: new Date().toISOString(),
+    cache_ttl_ms: KPI_CACHE_TTL_MS,
+    totals,
+    by_table: [
+      {
+        table_name: tableName,
+        status_column: statusColumn,
+        work_id_column: null,
+        canonical_key_columns: keyColumns,
+        total: totals.total_obras,
+        entregado: totals.entregadas,
+        terminado: totals.terminadas,
+        proceso: totals.en_proceso,
+        sin_iniciar: totals.sin_iniciar,
+        otro: totals.otro,
+      },
+    ],
+    audit: {
+      source: "canonical_table",
+      canonical_table: tableName,
+      canonical_key_columns: keyColumns,
+      target_tables: 1,
+      included_tables: 1,
+      included_tables_with_work_id: 1,
+      work_id_coverage_ratio: 1,
+      skipped_tables: [],
+      totals_strategy: "canonical_distinct_composite_key",
+      totals_from_table_sum: totals,
+      totals_from_global_distinct: totals,
+    },
+  };
+}
+
 async function getKpiSummaryCatalog() {
   const validCachedSummary = getValidKpiSummaryCache();
   if (validCachedSummary) return validCachedSummary;
@@ -989,6 +1144,20 @@ async function getKpiSummaryCatalog() {
     accumulator.set(tableName, currentColumns);
     return accumulator;
   }, new Map());
+
+  try {
+    const canonicalSummary = await getCanonicalKpiSummary(columnsByTable);
+    if (canonicalSummary) {
+      kpiSummaryCache = canonicalSummary;
+      kpiSummaryCacheTime = Date.now();
+      return canonicalSummary;
+    }
+  } catch (error) {
+    logBackendError(
+      `[GIS API] Falló KPI canónico para "${KPI_CANONICAL_TABLE}"`,
+      error?.message || error,
+    );
+  }
 
   const targetTables = catalog.filter(
     (table) =>
