@@ -24,7 +24,11 @@
 import React from 'react';
 import { BASE_MAPS, DEFAULT_BASE_MAP_ID } from '../data/baseMaps';
 import cdmxBoundaryData from '../data/cdmxBoundary.json';
-import { fetchLayerGeoJSON, fetchLayerTables } from '../services/gisApi';
+import {
+  clearLayerGeoJsonCache,
+  fetchLayerGeoJSON,
+  fetchLayerTables,
+} from '../services/gisApi';
 
 // Contexto React — null es el valor default (se reemplaza por el Provider)
 const GISWorkspaceContext = React.createContext(null);
@@ -44,17 +48,19 @@ const UPLOAD_COLORS = [
 // para no descargar GeoJSON pesados innecesariamente en cada sesión.
 // En producción: 5 min. En desarrollo: 90 s (era 30 s, causaba rebuilds de Effect 1
 // cada 30 s aunque los datos no cambiaran — visible como parpadeo en el mapa).
-const DEFAULT_DATABASE_SYNC_INTERVAL_MS =
-  process.env.NODE_ENV === 'production' ? 5 * 60 * 1000 : 90 * 1000;
+const DEFAULT_DATABASE_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const DATABASE_SYNC_INTERVAL_MS = Math.max(
   15000,
   Number(process.env.REACT_APP_GIS_SYNC_INTERVAL_MS || DEFAULT_DATABASE_SYNC_INTERVAL_MS)
 );
 const DATABASE_LAYER_LOAD_CONCURRENCY = Math.max(
-  1,
-  Number(process.env.REACT_APP_GIS_LOAD_CONCURRENCY || 3)
+  2,
+  Number(process.env.REACT_APP_GIS_LOAD_CONCURRENCY || 14)
 );
+const ENABLE_GIS_DEBUG_LOGS =
+  String(process.env.REACT_APP_GIS_DEBUG_LOGS || '').toLowerCase() === 'true';
 const LEGACY_BOOTSTRAP_LAYER_PREFIX = 'bootstrap-';
+const BASE_CARTOGRAPHY_GROUP_KEY = 'SIN DG';
 
 // ── Persistencia de visibilidad en localStorage ───────────────────────────────
 // Cuando el usuario refresca la página el estado React se pierde.
@@ -84,6 +90,55 @@ function writeSavedVisibility(layers) {
   } catch {
     // localStorage no disponible (modo privado, etc.)
   }
+}
+
+function isCartographyBaseLayer(layer) {
+  if (!layer) return false;
+  if (layer.referenceLayer) return true;
+  const raw = String(layer.dg || '').trim();
+  if (!raw) return true;
+  const normalized = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (normalized === BASE_CARTOGRAPHY_GROUP_KEY) return true;
+  return normalized.includes('CARTOGRAFIA BASE');
+}
+
+function isPointLikeGeometryType(geometryType) {
+  return geometryType === 'Point' || geometryType === 'MultiPoint';
+}
+
+const FEATURE_WORK_ID_KEYS = [
+  'ID_OBRA',
+  'id_obra',
+  'ID OBRA',
+  'id obra',
+  'CVE_OBRA',
+  'cve_obra',
+  'OBRA_ID',
+  'obra_id',
+  'IDOBRA',
+  'idobra',
+];
+
+function resolveFeatureWorkId(properties = {}) {
+  for (const key of FEATURE_WORK_ID_KEYS) {
+    const raw = properties?.[key];
+    if (raw == null) continue;
+    const value = String(raw).trim();
+    if (!value) continue;
+    return value;
+  }
+  return null;
+}
+
+function buildFeatureUniqueWorkKey(feature) {
+  const id = resolveFeatureWorkId(feature?.properties || {});
+  if (!id) return null;
+  return id.toUpperCase();
 }
 
 // Estado inicial de los filtros — 'all' significa "sin filtro activo"
@@ -342,6 +397,23 @@ function getInitialCompactViewport() {
   return window.innerWidth <= MOBILE_BREAKPOINT;
 }
 
+function isFullstackModeRequested() {
+  if (typeof window === 'undefined') return false;
+
+  const params = new URLSearchParams(window.location.search);
+  const modeParam = String(params.get('mode') || '').toLowerCase();
+  const forceProParam = String(params.get('force_pro') || '').toLowerCase();
+  const allowProOnce =
+    window.sessionStorage?.getItem('sigsobse_allow_pro_once') === '1';
+  const explicitProRequest = (
+    forceProParam === '1' || forceProParam === 'true'
+  ) && (modeParam === 'pro' || modeParam === 'editor') && allowProOnce;
+
+  // Modo principal FULLSCREEN por defecto.
+  // Solo se permite modo Pro cuando viene explícitamente solicitado.
+  return !explicitProRequest;
+}
+
 // ── Utilidades de geometría y estilo de capas ─────────────────────────────────
 
 // Extrae el tipo de geometría del primer feature válido de la capa.
@@ -448,11 +520,231 @@ function normalizeDG(value) {
   if (compact.includes('DGOT')) return 'DGOT';
   if (compact.includes('DGPEST')) return 'DGPEST';
   if (compact.includes('DGOIV')) return 'DGOIV';
-  if (compact.includes('ILIFE')) return 'ILIFE';
-  if (compact.includes('DGUV')) return 'DGUV';
-  if (compact.includes('DGAF')) return 'DGAF';
 
   return normalized;
+}
+
+function normalizeDGCode(value) {
+  if (!value) return null;
+
+  const v = String(value).toUpperCase().trim();
+
+  if (v.includes('DGCOP')) return 'DGCOP';
+  if (v.includes('DGOT')) return 'DGOT';
+  if (v.includes('DGPEST')) return 'DGPEST';
+  if (v.includes('DGSUS')) return 'DGSUS';
+  if (v.includes('ILIFE')) return 'ILIFE';
+
+  // Fallback: use raw value so features with other DGs are not dropped silently
+  return v;
+}
+
+function parseGeometry(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function collectCoordinatePairs(coordinates, pairs = []) {
+  if (!Array.isArray(coordinates)) return pairs;
+
+  if (
+    coordinates.length >= 2 &&
+    !Array.isArray(coordinates[0]) &&
+    !Array.isArray(coordinates[1])
+  ) {
+    pairs.push([coordinates[0], coordinates[1]]);
+    return pairs;
+  }
+
+  coordinates.forEach((entry) => collectCoordinatePairs(entry, pairs));
+  return pairs;
+}
+
+function isValidLngLatPair(pair) {
+  const lng = Number(pair?.[0]);
+  const lat = Number(pair?.[1]);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return false;
+  if (Math.abs(lng) <= 1e-9 && Math.abs(lat) <= 1e-9) return false; // Null Island
+  if (lng < -180 || lng > 180) return false;
+  if (lat < -90 || lat > 90) return false;
+  return true;
+}
+
+function hasRenderableWgs84Geometry(geometry) {
+  if (!geometry || typeof geometry !== 'object') return false;
+  if (geometry.type === 'GeometryCollection') {
+    const geometries = Array.isArray(geometry.geometries) ? geometry.geometries : [];
+    if (!geometries.length) return false;
+    return geometries.every((entry) => hasRenderableWgs84Geometry(entry));
+  }
+
+  const coordinatePairs = collectCoordinatePairs(geometry.coordinates, []);
+  if (!coordinatePairs.length) return false;
+  return coordinatePairs.every((pair) => isValidLngLatPair(pair));
+}
+
+function ensureFeatureFormat(row) {
+  if (!row || typeof row !== 'object') return null;
+
+  // Already a valid GeoJSON Feature — guarantee properties is always an object
+  if (row.type === 'Feature') {
+    return {
+      ...row,
+      properties: row.properties && typeof row.properties === 'object'
+        ? row.properties
+        : {},
+    };
+  }
+
+  // Raw row from backend — build geometry and keep all fields as properties
+  let geometry =
+    parseGeometry(row.geom) ||
+    parseGeometry(row.geometry) ||
+    parseGeometry(row.the_geom) ||
+    null;
+
+  if (!geometry && row.X && row.Y) {
+    geometry = {
+      type: 'Point',
+      coordinates: [Number(row.X), Number(row.Y)],
+    };
+  }
+
+  const properties = { ...row };
+  delete properties.geom;
+  delete properties.geometry;
+  delete properties.the_geom;
+
+  if (ENABLE_GIS_DEBUG_LOGS && !Object.keys(properties).length) {
+    console.warn('⚠️ ensureFeatureFormat: row sin propiedades', row);
+  }
+
+  return {
+    type: 'Feature',
+    geometry,
+    properties,
+  };
+}
+
+// Alias para compatibilidad con código existente
+const createFeatureFromRow = ensureFeatureFormat;
+
+function normalizeLayerGeoJsonResponse(payload, tableName) {
+  if (!payload) return null;
+
+  // FeatureCollection del backend: sanitizar properties de cada feature
+  if (payload.type === 'FeatureCollection' && Array.isArray(payload.features)) {
+    const features = payload.features
+      .map(ensureFeatureFormat)
+      .filter((feature) => hasRenderableWgs84Geometry(feature?.geometry))
+      .filter(Boolean);
+
+    if (ENABLE_GIS_DEBUG_LOGS) {
+      console.log('FEATURE NORMALIZADO (sample):', features[0]);
+    }
+
+    return { ...payload, features };
+  }
+
+  if (Array.isArray(payload)) {
+    return {
+      type: 'FeatureCollection',
+      features: payload.map(ensureFeatureFormat).filter(Boolean),
+    };
+  }
+
+  const rows = Array.isArray(payload.rows)
+    ? payload.rows
+    : Array.isArray(payload.data)
+    ? payload.data
+    : Array.isArray(payload.data?.rows)
+    ? payload.data.rows
+    : null;
+
+  if (rows) {
+    return {
+      type: 'FeatureCollection',
+      features: rows
+        .map(ensureFeatureFormat)
+        .filter((feature) => hasRenderableWgs84Geometry(feature?.geometry))
+        .filter(Boolean),
+    };
+  }
+
+  return null;
+}
+
+function getDGFromFeature(feature) {
+  const props = feature?.properties || {};
+
+  const normalizeKey = (key) =>
+    key
+      .toString()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, '')
+      .toUpperCase();
+
+  const normalizedProps = {};
+  Object.keys(props).forEach((key) => {
+    normalizedProps[normalizeKey(key)] = props[key];
+  });
+
+  const rawDG =
+    normalizedProps['DIRECCIONGENERAL'] ||
+    normalizedProps['DG'] ||
+    normalizedProps['DEPENDENCIA'] ||
+    normalizedProps['AREA'] ||
+    '';
+
+  if (!rawDG) {
+    if (ENABLE_GIS_DEBUG_LOGS) {
+      console.warn('⚠️ No se encontró DG en feature:', props);
+    }
+    return [];
+  }
+
+  const dgs = String(rawDG)
+    .split(',')
+    .map((d) => d.trim().toUpperCase())
+    .filter(Boolean);
+
+  if (ENABLE_GIS_DEBUG_LOGS) {
+    console.log('DG SPLIT:', rawDG, '→', dgs);
+  }
+
+  return dgs;
+}
+
+function groupFeaturesByDG(features) {
+  if (ENABLE_GIS_DEBUG_LOGS) {
+    console.log('🧪 SAMPLE FEATURE PROPERTIES:', features?.[0]?.properties);
+  }
+
+  const grouped = {};
+
+  (features || []).forEach((feature) => {
+    const dgs = getDGFromFeature(feature);
+    if (!dgs.length) return;
+
+    dgs.forEach((dg) => {
+      const normalizedDG = normalizeDGCode(dg);
+      if (!normalizedDG) return;
+      if (!grouped[normalizedDG]) grouped[normalizedDG] = [];
+      grouped[normalizedDG].push(feature);
+    });
+  });
+
+  if (ENABLE_GIS_DEBUG_LOGS) {
+    console.log('🔥 DG DISTRIBUCIÓN FINAL:', grouped);
+  }
+
+  return grouped;
 }
 
 const INSTITUTIONAL_ACRONYMS = new Set([
@@ -621,7 +913,6 @@ function boundsIntersect(leftBounds, rightBounds) {
 
 function shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds) {
   if (!layer?.databaseLayer || !layer.visible) return false;
-  if (!layer.loadRequested) return false;
   if (layer.loadStatus === 'loading' || layer.loadStatus === 'loaded') return false;
   if (layer.loadStatus === 'error') return false;
 
@@ -642,12 +933,12 @@ function shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds) {
 // mediante spread merging: baseStyle con los cambios del usuario encima.
 function buildDatabaseLayerDefinition({
   existingLayer,
+  existingLayerByDg,
   geoJson,
   metadata,
   name,
 }) {
   const tableName = String(metadata?.table_name || name || '').trim();
-  const layerId = existingLayer?.id || `db-${tableName}`;
   const hasFreshGeoJson =
     geoJson &&
     geoJson.type === 'FeatureCollection' &&
@@ -656,75 +947,187 @@ function buildDatabaseLayerDefinition({
     hasFreshGeoJson
       ? geoJson
       : existingLayer?.data || createEmptyFeatureCollection();
-  const geometryType = hasFreshGeoJson
-    ? getGeometryType(geoJson)
-    : existingLayer?.geometryType || 'Unknown';
-  const enriched = enrichFeatureCollection(layerId, baseCollection);
-  const color = existingLayer?.color || getStableColor(tableName);
-  const baseStyle = buildLayerStyle(color, geometryType);
-  const dg = normalizeDG(
-    metadata?.dg || existingLayer?.dg || detectLayerDg(enriched)
-  );
-  const displayName = formatDatabaseLayerName(name || tableName);
-  const estimatedFeatureCount = Math.max(
-    0,
-    Number(metadata?.estimated_count ?? existingLayer?.estimatedFeatureCount ?? 0)
-  );
-  const loadStatus = hasFreshGeoJson
-    ? 'loaded'
-    : existingLayer?.loadStatus || 'idle';
-  const loadError = hasFreshGeoJson ? null : existingLayer?.loadError || null;
-  const catalogBbox = normalizeCatalogBbox(
-    metadata?.bbox || existingLayer?.catalogBbox
-  );
 
-  return {
-    id: layerId,
-    name: displayName,
-    // Conserva la visibilidad del existente; las nuevas capas leen localStorage
-    // para restaurar el estado tras un refresco de página.
-    visible:
-      typeof existingLayer?.visible === 'boolean'
-        ? existingLayer.visible
-        : (readSavedVisibility()[tableName] ?? false),
-    color,
-    source: 'PostgreSQL',
-    dg,
-    programa: displayName,
-    alcaldia: null,
-    data: enriched,
-    geometryType,
-    // Si ya existía, aplica el estilo base y encima el estilo personalizado del usuario
-    style: existingLayer
-      ? {
-          ...baseStyle,
-          ...(existingLayer.style || {}),
-        }
-      : baseStyle,
-    // initialStyle guarda el estilo original para el botón "Restaurar estilos"
-    initialStyle: existingLayer?.initialStyle || { ...baseStyle },
-    uploaded: false,
-    database: true,
-    databaseLayer: true,          // flag para identificar capas de BD vs. subidas
-    databaseTable: tableName,
-    databaseDisplayName: displayName,
-    databaseSchema: metadata?.table_schema || 'sig_sobse',
-    databaseSourceType: metadata?.source_type || 'postgis',
-    databaseGeometryColumn: metadata?.geometry_column || 'geom',
-    databaseMetadata: {
-      ...(existingLayer?.databaseMetadata || {}),
-      ...(metadata || {}),
-      table_name: tableName,
-    },
-    catalogBbox,
-    estimatedFeatureCount,
-    loadStatus,
-    loadError,
-    loadRequested:
-      typeof existingLayer?.loadRequested === 'boolean'
-        ? existingLayer.loadRequested
-        : (readSavedVisibility()[tableName] ?? false),
-  };
+  const groupedFeatures = groupFeaturesByDG(baseCollection.features);
+  if (ENABLE_GIS_DEBUG_LOGS) {
+    console.log('DG DISTRIBUCIÓN:', {
+      table: tableName,
+      dgs: Object.keys(groupedFeatures),
+    });
+  }
+  const layerDefinitions = Object.keys(groupedFeatures).map((dg) => {
+    const dgFeatures = groupedFeatures[dg];
+    const dgCollection = {
+      ...baseCollection,
+      features: dgFeatures,
+    };
+    const existingGroupLayer =
+      existingLayerByDg?.get(`${tableName}-${dg}`) || existingLayer;
+    const dgLayerId =
+      existingGroupLayer?.id || `db-${tableName}-${dg}`;
+    const geometryType = getGeometryType(dgCollection);
+    const enriched = enrichFeatureCollection(dgLayerId, dgCollection);
+    const color = existingGroupLayer?.color || getStableColor(`${tableName}-${dg}`);
+    const baseStyle = buildLayerStyle(color, geometryType);
+    const displayName = formatDatabaseLayerName(name || tableName);
+    const isBaseCartography = isCartographyBaseLayer({ dg });
+
+    const layer = {
+      id: dgLayerId,
+      name: displayName,
+      visible:
+        isBaseCartography
+          ? true
+          : typeof existingGroupLayer?.visible === 'boolean'
+          ? existingGroupLayer.visible
+          : false,
+      color,
+      source: 'PostgreSQL',
+      dg,
+      programa: displayName,
+      alcaldia: null,
+      data: enriched,
+      geometryType,
+      style: existingGroupLayer
+        ? {
+            ...baseStyle,
+            ...(existingGroupLayer.style || {}),
+          }
+        : baseStyle,
+      initialStyle: existingGroupLayer?.initialStyle || { ...baseStyle },
+      uploaded: false,
+      lockedVisible: isBaseCartography
+        ? true
+        : Boolean(existingGroupLayer?.lockedVisible),
+      hideInLayersPanel: isBaseCartography
+        ? true
+        : Boolean(existingGroupLayer?.hideInLayersPanel),
+      database: true,
+      databaseLayer: true,
+      databaseTable: tableName,
+      databaseDisplayName: displayName,
+      databaseSchema: metadata?.table_schema || 'sig_sobse',
+      databaseSourceType: metadata?.source_type || 'postgis',
+      databaseGeometryColumn: metadata?.geometry_column || 'geom',
+      databaseMetadata: {
+        ...(existingGroupLayer?.databaseMetadata || {}),
+        ...(metadata || {}),
+        table_name: tableName,
+        dg,
+      },
+      catalogBbox: normalizeCatalogBbox(
+        metadata?.bbox || existingGroupLayer?.catalogBbox
+      ),
+      estimatedFeatureCount: dgFeatures.length,
+      loadStatus: hasFreshGeoJson ? 'loaded' : existingGroupLayer?.loadStatus || 'idle',
+      loadError: hasFreshGeoJson ? null : existingGroupLayer?.loadError || null,
+      loadRequested: existingGroupLayer
+        ? existingGroupLayer.loadRequested
+        : true,
+      dataLoaded: hasFreshGeoJson || existingGroupLayer?.dataLoaded || false,
+      features: enriched.features || [],
+    };
+
+    if (ENABLE_GIS_DEBUG_LOGS) {
+      console.log('Layer construido:', {
+        name: layer.name,
+        features: layer.features.length,
+        tableName,
+        dg,
+      });
+      console.log('FEATURES CARGADAS:', {
+        layer: layer.name,
+        count: layer.features.length,
+      });
+      console.log('LAYER STATE:', {
+        name: layer.name,
+        loadRequested: layer.loadRequested,
+        visible: layer.visible,
+      });
+    }
+
+    return layer;
+  });
+
+  if (layerDefinitions.length === 0) {
+    const dg = normalizeDG(metadata?.dg || existingLayer?.dg || 'Sin DG');
+    const existingGroupLayer = existingLayer;
+    const layerId = existingGroupLayer?.id || `db-${tableName}-${dg}`;
+    const enriched = enrichFeatureCollection(layerId, createEmptyFeatureCollection());
+    const geometryType = getGeometryType(enriched);
+    const color = existingGroupLayer?.color || getStableColor(`${tableName}-${dg}`);
+    const baseStyle = buildLayerStyle(color, geometryType);
+    const displayName = formatDatabaseLayerName(name || tableName);
+    const isBaseCartography = isCartographyBaseLayer({ dg });
+
+    const layer = {
+      id: layerId,
+      name: displayName,
+      visible:
+        isBaseCartography
+          ? true
+          : typeof existingGroupLayer?.visible === 'boolean'
+          ? existingGroupLayer.visible
+          : false,
+      color,
+      source: 'PostgreSQL',
+      dg,
+      programa: displayName,
+      alcaldia: null,
+      data: enriched,
+      features: enriched.features || [],
+      geometryType,
+      style: existingGroupLayer
+        ? {
+            ...baseStyle,
+            ...(existingGroupLayer.style || {}),
+          }
+        : baseStyle,
+      initialStyle: existingGroupLayer?.initialStyle || { ...baseStyle },
+      uploaded: false,
+      lockedVisible: isBaseCartography
+        ? true
+        : Boolean(existingGroupLayer?.lockedVisible),
+      hideInLayersPanel: isBaseCartography
+        ? true
+        : Boolean(existingGroupLayer?.hideInLayersPanel),
+      database: true,
+      databaseLayer: true,
+      databaseTable: tableName,
+      databaseDisplayName: displayName,
+      databaseSchema: metadata?.table_schema || 'sig_sobse',
+      databaseSourceType: metadata?.source_type || 'postgis',
+      databaseGeometryColumn: metadata?.geometry_column || 'geom',
+      databaseMetadata: {
+        ...(existingGroupLayer?.databaseMetadata || {}),
+        ...(metadata || {}),
+        table_name: tableName,
+        dg,
+      },
+      catalogBbox: normalizeCatalogBbox(
+        metadata?.bbox || existingGroupLayer?.catalogBbox
+      ),
+      estimatedFeatureCount: 0,
+      loadStatus: existingGroupLayer?.loadStatus || 'idle',
+      loadError: existingGroupLayer?.loadError || null,
+      loadRequested: existingGroupLayer
+        ? existingGroupLayer.loadRequested
+        : true,
+      dataLoaded: existingGroupLayer?.dataLoaded || false,
+    };
+
+    if (ENABLE_GIS_DEBUG_LOGS) {
+      console.log('Layer stub construido:', {
+        name: layer.name,
+        tableName,
+        dg,
+      });
+    }
+
+    return [layer];
+  }
+
+  return layerDefinitions;
 }
 
 function buildReferenceLayerDefinition({
@@ -754,11 +1157,14 @@ function buildReferenceLayerDefinition({
     programa: null,
     alcaldia: null,
     data,
+    features: data.features || [],
     geometryType,
     style,
     initialStyle: { ...style },
     uploaded: false,
     referenceLayer: true,
+    lockedVisible: true,
+    hideInLayersPanel: true,
   };
 }
 
@@ -775,30 +1181,51 @@ function createInitialLayers() {
 function mergeDatabaseLayers(currentLayers, layerPayloads, orderedTableNames) {
   const tableOrder = Array.isArray(orderedTableNames) ? orderedTableNames : [];
   const nonDatabaseLayers = currentLayers.filter((layer) => !layer.databaseLayer);
-  const databaseLayersByTable = new Map(
+  const existingLayersByDg = new Map(
     currentLayers
       .filter((layer) => layer.databaseLayer)
-      .map((layer) => [layer.databaseTable, layer])
+      .map((layer) => [`${layer.databaseTable}-${layer.dg}`, layer])
+  );
+  const existingTableLayer = currentLayers.find((layer) => layer.databaseLayer);
+
+  const databaseLayersById = new Map(
+    currentLayers
+      .filter((layer) => layer.databaseLayer)
+      .map((layer) => [layer.id, layer])
   );
 
   layerPayloads.forEach(({ tableName, geoJson, metadata }) => {
-    const existingLayer = databaseLayersByTable.get(tableName);
-    databaseLayersByTable.set(
-      tableName,
-      buildDatabaseLayerDefinition({
-        existingLayer,
-        geoJson,
-        metadata,
-        name: tableName,
-      })
+    const existingLayer = currentLayers.find(
+      (layer) => layer.databaseLayer && layer.databaseTable === tableName,
     );
+
+    const layerDefinitions = buildDatabaseLayerDefinition({
+      existingLayer,
+      existingLayerByDg: existingLayersByDg,
+      geoJson,
+      metadata,
+      name: tableName,
+    });
+
+    layerDefinitions.forEach((layer) => {
+      databaseLayersById.set(layer.id, layer);
+    });
   });
 
-  const nextDatabaseLayers = tableOrder
-    .map((tableName) => databaseLayersByTable.get(tableName))
-    .filter(Boolean);
+  const nextDatabaseLayers = tableOrder.flatMap((tableName) => {
+    const tableLayers = Array.from(databaseLayersById.values()).filter(
+      (layer) => layer.databaseTable === tableName,
+    );
 
-  return [...nonDatabaseLayers, ...nextDatabaseLayers];
+    return tableLayers.sort((a, b) => a.dg.localeCompare(b.dg));
+  });
+
+  const allLayers = [...nonDatabaseLayers, ...nextDatabaseLayers];
+  if (ENABLE_GIS_DEBUG_LOGS) {
+    console.log('[GIS CONTEXT] TOTAL LAYERS EN CONTEXTO:', allLayers.length);
+  }
+
+  return allLayers;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -811,6 +1238,9 @@ export function GISWorkspaceProvider({ children }) {
   const initialLayersRef = React.useRef(createInitialLayers());
   const databaseSyncInFlightRef = React.useRef(false);
   const databaseLoadInFlightRef = React.useRef(new Map());
+  const databaseCatalogSignatureRef = React.useRef('');
+  const databaseBootstrapReadyRef = React.useRef(false);
+  const forceFullstackModeRef = React.useRef(isFullstackModeRequested());
 
   // Ref auxiliar para detectar transiciones de desktop → móvil
   // y ocultar capas automáticamente cuando el visor entra en modo compacto.
@@ -850,6 +1280,10 @@ export function GISWorkspaceProvider({ children }) {
   // mapApi: referencia al objeto Leaflet map que expone MapView hacia arriba
   const [mapApi, setMapApi] = React.useState(null);
   const [mapViewportBounds, setMapViewportBounds] = React.useState(null);
+  const [databaseBootstrapLoading, setDatabaseBootstrapLoading] =
+    React.useState(true);
+  const [databaseBootstrapReady, setDatabaseBootstrapReady] =
+    React.useState(false);
 
   // clearSignal: contador que incrementa para avisar a MapView que limpie dibujos
   // (mejor que un boolean porque siempre dispara el effect aunque ya fuera true)
@@ -877,7 +1311,9 @@ export function GISWorkspaceProvider({ children }) {
   }, []);
 
   // true si estamos en pantalla pequeña O si el usuario activó el modo móvil manualmente
-  const isMobileModeActive = isCompactViewport || mobileModeManual;
+  const isMobileModeActive = forceFullstackModeRef.current
+    ? false
+    : isCompactViewport || mobileModeManual;
 
   // ── Effect: persistir visibilidad de capas en localStorage ───────────────
   // Se ejecuta cada vez que el array de capas cambia.
@@ -931,12 +1367,15 @@ export function GISWorkspaceProvider({ children }) {
     const syncDatabaseLayers = async () => {
       if (databaseSyncInFlightRef.current) return;
       databaseSyncInFlightRef.current = true;
+      if (!databaseBootstrapReadyRef.current) {
+        setDatabaseBootstrapLoading(true);
+      }
 
       try {
         const catalog = await fetchLayerTables();
         const tables = Array.isArray(catalog?.tables) ? catalog.tables : [];
 
-        if (process.env.NODE_ENV !== 'production') {
+        if (ENABLE_GIS_DEBUG_LOGS) {
           console.log('[GIS SYNC] Catálogo recibido:', tables.length, 'tablas', tables);
         }
 
@@ -949,12 +1388,41 @@ export function GISWorkspaceProvider({ children }) {
         const orderedTableNames = geomTables.map((tableInfo) =>
           String(tableInfo?.name || tableInfo?.table_name || '').trim()
         );
+        const catalogSignature = geomTables
+          .map((tableInfo) => {
+            const tableName = String(
+              tableInfo?.name || tableInfo?.table_name || ''
+            ).trim();
+            const updatedAt = String(
+              tableInfo?.updated_at ||
+                tableInfo?.last_update ||
+                tableInfo?.updated ||
+                ''
+            ).trim();
+            const estimatedCount = Number(
+              tableInfo?.estimated_count ||
+                tableInfo?.feature_count ||
+                tableInfo?.row_count ||
+                0
+            );
+            const bbox = normalizeCatalogBbox(tableInfo?.bbox);
+            const bboxSignature = bbox
+              ? `${bbox.west.toFixed(4)},${bbox.south.toFixed(4)},${bbox.east.toFixed(4)},${bbox.north.toFixed(4)}`
+              : 'nobbox';
+            return `${tableName}|${updatedAt}|${estimatedCount}|${bboxSignature}`;
+          })
+          .sort((left, right) => left.localeCompare(right))
+          .join('||');
 
-        if (process.env.NODE_ENV !== 'production') {
+        if (ENABLE_GIS_DEBUG_LOGS) {
           console.log('[GIS SYNC] Capas con geometría:', orderedTableNames);
         }
 
         if (cancelled) return;
+        if (catalogSignature === databaseCatalogSignatureRef.current) return;
+
+        databaseCatalogSignatureRef.current = catalogSignature;
+        clearLayerGeoJsonCache();
 
         setLayers((currentLayers) =>
           mergeDatabaseLayers(
@@ -978,6 +1446,11 @@ export function GISWorkspaceProvider({ children }) {
         }
       } finally {
         databaseSyncInFlightRef.current = false;
+        if (!cancelled && !databaseBootstrapReadyRef.current) {
+          databaseBootstrapReadyRef.current = true;
+          setDatabaseBootstrapReady(true);
+          setDatabaseBootstrapLoading(false);
+        }
       }
     };
 
@@ -994,6 +1467,51 @@ export function GISWorkspaceProvider({ children }) {
       window.clearInterval(intervalId);
     };
   }, []); // array vacío → solo corre una vez al montar la app
+
+  const loadDatabaseLayer = React.useCallback(async (layer) => {
+    const tableName = String(layer?.databaseTable || '').trim();
+    if (!tableName) return;
+
+    const rawResponse = await fetchLayerGeoJSON(tableName);
+    const geoJson = normalizeLayerGeoJsonResponse(rawResponse, tableName);
+
+    if (!geoJson || !Array.isArray(geoJson.features)) {
+      throw new Error(`GeoJSON inválido para ${tableName}`);
+    }
+
+    setLayers((currentLayers) => {
+      const existingLayer = currentLayers.find(
+        (currentLayer) =>
+          currentLayer.databaseLayer &&
+          currentLayer.databaseTable === tableName
+      );
+
+      if (!existingLayer) return currentLayers;
+
+      return mergeDatabaseLayers(
+        currentLayers,
+        [
+          {
+            tableName,
+            geoJson,
+            metadata: existingLayer.databaseMetadata || {
+              table_name: tableName,
+            },
+          },
+        ],
+        currentLayers
+          .filter((currentLayer) => currentLayer.databaseLayer)
+          .map((currentLayer) => currentLayer.databaseTable)
+      );
+    });
+
+    if (ENABLE_GIS_DEBUG_LOGS) {
+      console.log('CAPA CARGADA:', {
+        name: layer.name,
+        features: geoJson.features.length,
+      });
+    }
+  }, []);
 
   const ensureDatabaseLayerLoaded = React.useCallback(async (layer) => {
     const tableName = String(layer?.databaseTable || '').trim();
@@ -1019,13 +1537,19 @@ export function GISWorkspaceProvider({ children }) {
       );
 
       try {
-        const geoJson = await fetchLayerGeoJSON(tableName);
+        if (!layer.dataLoaded) {
+          await loadDatabaseLayer(layer);
+          return;
+        }
 
-        if (process.env.NODE_ENV !== 'production') {
+        const rawResponse = await fetchLayerGeoJSON(tableName);
+        const geoJson = normalizeLayerGeoJsonResponse(rawResponse, tableName);
+
+        if (ENABLE_GIS_DEBUG_LOGS) {
+          console.log('[GIS LOAD] DATA BACKEND:', tableName, rawResponse);
           const count = geoJson?.features?.length ?? 0;
           console.log(`[GIS LOAD] ${tableName}:`, count, 'features');
 
-          // Validación de CRS: muestrear hasta 5 features para verificar coordenadas WGS84
           if (count > 0) {
             const sample = geoJson.features.slice(0, 5);
             let badCoords = 0;
@@ -1102,7 +1626,7 @@ export function GISWorkspaceProvider({ children }) {
 
     databaseLoadInFlightRef.current.set(tableName, requestPromise);
     await requestPromise;
-  }, []);
+  }, [loadDatabaseLayer]);
 
   React.useEffect(() => {
     const candidateLayers = layers.filter((layer) =>
@@ -1158,8 +1682,18 @@ export function GISWorkspaceProvider({ children }) {
   // El mapa y el panel de información usan esta versión, no `layers` directamente.
   // Nota: las capas con 0 features tras filtrar se eliminan completamente.
   const filteredLayers = React.useMemo(
-    () =>
-      layers
+    () => {
+      const hasActiveFilters =
+        dataFilters.dg !== 'all' ||
+        dataFilters.programa !== 'all' ||
+        dataFilters.alcaldia !== 'all' ||
+        dataFilters.obra.trim() !== '';
+
+      if (!hasActiveFilters) {
+        return layers.filter((layer) => (layer.data?.features?.length || 0) > 0);
+      }
+
+      return layers
         .map((layer) => {
           const features = (layer.data?.features || []).filter((feature) =>
             featureMatchesFilters(feature, dataFilters)
@@ -1173,33 +1707,58 @@ export function GISWorkspaceProvider({ children }) {
             },
           };
         })
-        .filter((layer) => layer.data.features.length > 0),
+        .filter((layer) => layer.data.features.length > 0);
+    },
     [dataFilters, layers]
   );
 
   // Métricas por capa (total de elementos, progreso promedio, conteo de riesgo).
   // Se usa en el panel lateral para mostrar resúmenes de cada capa.
+  // Usa filteredLayers si hay filtros activos para mostrar conteos filtrados.
   const layerMetricsById = React.useMemo(() => {
+    const hasActiveFilters = dataFilters.dg !== 'all' || 
+                            dataFilters.programa !== 'all' || 
+                            dataFilters.alcaldia !== 'all' || 
+                            dataFilters.obra.trim() !== '';
+    
+    const layersToUse = hasActiveFilters ? filteredLayers : layers;
+    
     const metrics = new Map();
-    layers.forEach((layer) => {
+    layersToUse.forEach((layer) => {
       metrics.set(layer.id, computeLayerMetrics(layer));
     });
     return metrics;
-  }, [layers]);
+  }, [layers, filteredLayers, dataFilters]);
 
   // Total de features visibles tras aplicar los filtros — para el contador del header
   const filteredFeatureCount = React.useMemo(
-    () =>
-      filteredLayers.reduce(
-        (total, layer) => total + (layer.data?.features?.length || 0),
-        0
-      ),
+    () => {
+      const uniqueWorkKeys = new Set();
+      filteredLayers.forEach((layer) => {
+        if (layer.referenceLayer || layer.isBaseMap || layer.hideInLayersPanel) {
+          return;
+        }
+        (layer.data?.features || []).forEach((feature) => {
+          if (!isPointLikeGeometryType(feature?.geometry?.type)) return;
+          const workKey = buildFeatureUniqueWorkKey(feature);
+          if (!workKey) return;
+          uniqueWorkKeys.add(workKey);
+        });
+      });
+      return uniqueWorkKeys.size;
+    },
     [filteredLayers]
   );
 
   const selectedLayer =
     layers.find((layer) => layer.id === selectedLayerId) || null;
-  const visibleLayerCount = layers.filter((layer) => layer.visible).length;
+  const visibleLayerCount = layers.filter(
+    (layer) =>
+      layer.visible &&
+      !layer.referenceLayer &&
+      !layer.isBaseMap &&
+      !layer.hideInLayersPanel
+  ).length;
 
   // Resultados de búsqueda de capas en el panel lateral (filtro por texto en el buscador)
   const layerSearchResults = React.useMemo(() => {
@@ -1280,6 +1839,12 @@ export function GISWorkspaceProvider({ children }) {
           currentLayers.map((layer) =>
             layer.id === layerId
               ? (() => {
+                  if (layer.lockedVisible) {
+                    return {
+                      ...layer,
+                      visible: true,
+                    };
+                  }
                   const nextVisible = !layer.visible;
                   return {
                     ...layer,
@@ -1310,22 +1875,31 @@ export function GISWorkspaceProvider({ children }) {
       // Pone todas las capas como visibles (true) u ocultas (false)
       setAllLayersVisible(visible) {
         setLayers((currentLayers) =>
-          currentLayers.map((layer) => ({
-            ...layer,
-            visible,
-            loadRequested:
-              visible && layer.databaseLayer
-                ? true
-                : layer.loadRequested,
-            loadStatus:
-              visible && layer.databaseLayer && layer.loadStatus === 'error'
-                ? 'idle'
-                : layer.loadStatus,
-            loadError:
-              visible && layer.databaseLayer && layer.loadStatus === 'error'
-                ? null
-                : layer.loadError,
-          }))
+          currentLayers.map((layer) => {
+            if (layer.lockedVisible) {
+              return {
+                ...layer,
+                visible: true,
+              };
+            }
+
+            return {
+              ...layer,
+              visible,
+              loadRequested:
+                visible && layer.databaseLayer
+                  ? true
+                  : layer.loadRequested,
+              loadStatus:
+                visible && layer.databaseLayer && layer.loadStatus === 'error'
+                  ? 'idle'
+                  : layer.loadStatus,
+              loadError:
+                visible && layer.databaseLayer && layer.loadStatus === 'error'
+                  ? null
+                  : layer.loadError,
+            };
+          })
         );
       },
 
@@ -1333,26 +1907,35 @@ export function GISWorkspaceProvider({ children }) {
       // También la selecciona y le da foco para que el mapa centre en ella.
       showOnlyLayer(layerId) {
         setLayers((currentLayers) =>
-          currentLayers.map((layer) => ({
-            ...layer,
-            visible: layer.id === layerId,
-            loadRequested:
-              layer.id === layerId && layer.databaseLayer
-                ? true
-                : layer.loadRequested,
-            loadStatus:
-              layer.id === layerId &&
-              layer.databaseLayer &&
-              layer.loadStatus === 'error'
-                ? 'idle'
-                : layer.loadStatus,
-            loadError:
-              layer.id === layerId &&
-              layer.databaseLayer &&
-              layer.loadStatus === 'error'
-                ? null
-                : layer.loadError,
-          }))
+          currentLayers.map((layer) => {
+            if (layer.lockedVisible) {
+              return {
+                ...layer,
+                visible: true,
+              };
+            }
+
+            return {
+              ...layer,
+              visible: layer.id === layerId,
+              loadRequested:
+                layer.id === layerId && layer.databaseLayer
+                  ? true
+                  : layer.loadRequested,
+              loadStatus:
+                layer.id === layerId &&
+                layer.databaseLayer &&
+                layer.loadStatus === 'error'
+                  ? 'idle'
+                  : layer.loadStatus,
+              loadError:
+                layer.id === layerId &&
+                layer.databaseLayer &&
+                layer.loadStatus === 'error'
+                  ? null
+                  : layer.loadError,
+            };
+          })
         );
         setSelectedLayerId(layerId);
         setFocusedLayerId(layerId);
@@ -1475,6 +2058,7 @@ export function GISWorkspaceProvider({ children }) {
             programa: name,
             alcaldia: null,
             data: enriched,
+            features: enriched.features || [],
             geometryType,
             style,
             initialStyle: { ...style },
@@ -1497,7 +2081,7 @@ export function GISWorkspaceProvider({ children }) {
             (layer) => layer.databaseLayer && layer.databaseTable === tableName
           );
 
-          const nextLayer = buildDatabaseLayerDefinition({
+          const layerDefinitions = buildDatabaseLayerDefinition({
             existingLayer,
             geoJson,
             metadata: {
@@ -1507,12 +2091,11 @@ export function GISWorkspaceProvider({ children }) {
             name,
           });
 
-          // Elimina la versión anterior (si existe) y añade la nueva al final
           const nextLayers = currentLayers.filter(
             (layer) => !(layer.databaseLayer && layer.databaseTable === tableName)
           );
 
-          return [...nextLayers, nextLayer];
+          return [...nextLayers, ...(Array.isArray(layerDefinitions) ? layerDefinitions : [layerDefinitions])];
         });
       },
 
@@ -1570,6 +2153,12 @@ export function GISWorkspaceProvider({ children }) {
       // Si la pantalla ya es compacta por tamaño (isCompactViewport), solo abre el sheet.
       // Si no, alterna el modo manual.
       toggleMobileMode() {
+        if (forceFullstackModeRef.current) {
+          setMobileModeManual(false);
+          setMobileSheet(null);
+          return;
+        }
+
         if (isCompactViewport) {
           setMobileSheet((current) => current || 'layers');
           return;
@@ -1584,6 +2173,12 @@ export function GISWorkspaceProvider({ children }) {
       },
 
       exitMobileMode() {
+        if (forceFullstackModeRef.current) {
+          setMobileModeManual(false);
+          setMobileSheet(null);
+          return;
+        }
+
         setMobileModeManual(false);
         if (!isCompactViewport) {
           setMobileSheet(null);
@@ -1598,8 +2193,11 @@ export function GISWorkspaceProvider({ children }) {
             .filter((layer) => layer.databaseLayer || layer.referenceLayer)
             .map((layer) => ({
               ...layer,
-              visible: layer.referenceLayer ? true : false,
-              loadRequested: layer.referenceLayer ? layer.loadRequested : false,
+              visible: layer.referenceLayer || layer.lockedVisible ? true : false,
+              loadRequested:
+                layer.referenceLayer || layer.lockedVisible
+                  ? layer.loadRequested
+                  : false,
             }))
         );
         setSelectedLayerId(null);
@@ -1638,7 +2236,10 @@ export function GISWorkspaceProvider({ children }) {
       filteredLayers,
       interactionMode,
       isCompactViewport,
+      isFullstackModeForced: forceFullstackModeRef.current,
       isMobileModeActive,
+      databaseBootstrapLoading,
+      databaseBootstrapReady,
       layerQuery,
       layerMetricsById,
       layerSearchResults,
@@ -1670,6 +2271,8 @@ export function GISWorkspaceProvider({ children }) {
       interactionMode,
       isCompactViewport,
       isMobileModeActive,
+      databaseBootstrapLoading,
+      databaseBootstrapReady,
       layerQuery,
       layerMetricsById,
       layerSearchResults,

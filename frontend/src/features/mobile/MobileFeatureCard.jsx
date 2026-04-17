@@ -26,6 +26,31 @@ function isSafeUrl(value) {
   }
 }
 
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function normalizePotentialUrl(value) {
+  if (!value || typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (!raw) return null;
+
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (/^www\./i.test(raw)) return `https://${raw}`;
+  if (/^\//.test(raw) && typeof window !== 'undefined') {
+    return `${window.location.origin}${raw}`;
+  }
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw)) {
+    return `https://${raw}`;
+  }
+
+  return raw;
+}
+
 const TITLE_KEYS = [
   'OBRA',
   'obra',
@@ -48,6 +73,7 @@ const TITLE_KEYS = [
 ];
 
 const AVANCE_REAL_KEYS = [
+  'AVANCE REAL',
   'F_AV_REAL',
   'AV_REAL',
   'AVANCE_REAL',
@@ -141,13 +167,47 @@ const CONTRACT_FIELD_CONFIGS = [
   },
   {
     label: 'Fecha de inicio',
-    keys: ['FECHA_INICIO', 'fecha_inicio', 'INICIO_CONTRATO', 'inicio_contrato', 'FECHA_IN', 'F_FECHA_IN'],
+    keys: [
+      'INICIO DE CONTRATO',
+      'FECHA INICIO CONTRATO',
+      'FECHA_INICIO',
+      'fecha_inicio',
+      'INICIO_CONTRATO',
+      'inicio_contrato',
+      'FECHA_IN',
+      'F_FECHA_IN',
+      'F_INICIO_CONTRATO',
+      'FECHA_INICIO_CONTRATO',
+      'INICIO_CONTRATUAL',
+      'INICIO DEL CONTRATO',
+    ],
     format: formatDateValue,
   },
   {
     label: 'Fecha de término',
-    keys: ['FECHA_TERMINO', 'fecha_termino', 'TERMINO_CONTRATO', 'termino_contrato', 'FECHA_TE', 'F_FECHA_TE'],
+    keys: [
+      'TERMINO DE CONTRATO',
+      'FIN DE CONTRATO',
+      'FECHA TERMINO CONTRATO',
+      'FECHA FIN CONTRATO',
+      'FECHA_TERMINO',
+      'fecha_termino',
+      'TERMINO_CONTRATO',
+      'termino_contrato',
+      'FIN_CONTRATO',
+      'fin_contrato',
+      'FECHA_FIN',
+      'fecha_fin',
+      'FECHA_FIN_CONTRATO',
+      'F_FIN_CONTRATO',
+      'FECHA_TE',
+      'F_FECHA_TE',
+    ],
     format: formatDateValue,
+  },
+  {
+    label: 'JUD responsable',
+    keys: ['JUD RESPONSABLE DE LA SUPERVICION DEL CONTRATO', 'JUD_RESPONSABLE', 'jud_responsable', 'JUD RESPONSABLE'],
   },
 ];
 
@@ -308,6 +368,10 @@ function getStatusTone({ diferencia, estatus, isRisk }) {
   return 'neutral';
 }
 
+function formatPopulationMetric(value) {
+  return Number(value || 0).toLocaleString('es-MX');
+}
+
 function Section({ children, hasContent, title, variant = '' }) {
   if (!hasContent) return null;
 
@@ -319,24 +383,25 @@ function Section({ children, hasContent, title, variant = '' }) {
   );
 }
 
-function getProgressColor(pct) {
-  if (pct === 100) return '#16a34a'; // verde — terminado
-  if (pct > 70)   return '#eab308'; // amarillo — avance alto
-  if (pct > 30)   return '#f97316'; // naranja — en proceso
-  return '#dc2626';                  // rojo — inicio o sin avance
-}
-
 function ProgressBar({ value }) {
   if (!Number.isFinite(value)) return null;
 
-  const pct   = Math.min(100, Math.max(0, value));
-  const color = getProgressColor(pct);
+  const pct = Math.min(100, Math.max(0, value));
+  const color =
+    pct <= 30 ? '#dc2626' :
+    pct <= 70 ? '#f97316' :
+    pct < 100 ? '#eab308' :
+    '#16a34a';
+
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('AVANCE:', value);
+  }
 
   return (
     <div className="avance-box">
       <div className="avance-box__header">
         <span>Avance</span>
-        <strong style={{ color }}>{formatPercent(value)}</strong>
+        <strong>{formatPercent(value)}</strong>
       </div>
       <div className="avance-box__barra">
         <div
@@ -348,24 +413,22 @@ function ProgressBar({ value }) {
   );
 }
 
-function MobileFeatureCard() {
+function MobileFeatureCard({ feature = null }) {
   const { actions, selectedFeature } = useGISWorkspace();
   const [shareToast, setShareToast] = React.useState(false);
+  const [isMinimized, setIsMinimized] = React.useState(false);
   const panelRef = React.useRef(null);
+  const currentFeature = feature || selectedFeature;
 
   // Ref estable para acceder a actions dentro de efectos sin stale closure
   const actionsRef = React.useRef(actions);
   React.useEffect(() => { actionsRef.current = actions; });
 
   const properties = React.useMemo(
-    () => selectedFeature?.properties || null,
-    [selectedFeature]
+    () => currentFeature?.properties || null,
+    [currentFeature]
   );
   const safeProperties = React.useMemo(() => properties || {}, [properties]);
-  const tableroLink = getTableroLink(safeProperties);
-
-  // SEC-01: validar tableroLink antes de usarlo como href
-  const safeTableroLink = isSafeUrl(tableroLink) ? tableroLink : null;
 
   // Cerrar el panel completamente cuando se hace tap en el mapa fuera de él
   React.useEffect(() => {
@@ -381,19 +444,192 @@ function MobileFeatureCard() {
   }, []);
 
   React.useEffect(() => {
-    if (!selectedFeature || process.env.NODE_ENV === 'production') return;
+    if (!currentFeature || process.env.NODE_ENV === 'production') return;
+    const debugTableroLink = getTableroLink(safeProperties);
 
     console.log('DATA OBRA:', safeProperties);
-    console.log('TABLERO LINK:', tableroLink, safeProperties);
-  }, [safeProperties, selectedFeature, tableroLink]);
+    console.log('TABLERO LINK:', debugTableroLink, safeProperties);
+  }, [currentFeature, safeProperties]);
 
-  if (!selectedFeature) return null;
+  const featureMinimizeKey = String(
+    currentFeature?.properties?.__featureKey ||
+      `${currentFeature?.layerId || ''}-${currentFeature?.layerName || ''}`
+  );
+
+  React.useEffect(() => {
+    if (!featureMinimizeKey) return;
+    setIsMinimized(false);
+  }, [featureMinimizeKey]);
+
+  if (!currentFeature) return null;
+  const minimizeActionLabel = isMinimized ? 'Expandir detalle' : 'Minimizar detalle';
+
+  const mergedData = {
+    ...safeProperties,
+    ...(currentFeature.detail || {}),
+  };
+  const isPopulationFeature = mergedData.tipo === 'POBLACION';
+
+  if (isPopulationFeature) {
+    const totalPopulation = Number(mergedData.poblacion_total || mergedData.POBTOT || 0);
+    const elementsCount = Number(mergedData.elementos || mergedData.featuresCount || 0);
+    const radiusKm = Number(mergedData.radio || mergedData.radiusKm || 0);
+    const femalePopulation = Number(mergedData.POBFEM || 0);
+    const malePopulation = Number(mergedData.POBMAS || 0);
+    const seniorFemalePopulation = Number(mergedData.POB60_MAS_F || 0);
+    const seniorMalePopulation = Number(mergedData.POB60_MAS_M || 0);
+    const minorFemalePopulation = Number(mergedData.POB18_MEN_F || 0);
+    const minorMalePopulation = Number(mergedData.POB18_MEN_M || 0);
+
+    return (
+      <div className="mfc mfc--population" ref={panelRef}>
+        <div className="mfc__inner">
+          <div className="panel-header">
+            <h3 className="panel-title">Analisis de poblacion</h3>
+            <div className="panel-header__actions">
+              <button
+                aria-label={minimizeActionLabel}
+                className="icon-btn"
+                onClick={() => setIsMinimized((current) => !current)}
+                title={minimizeActionLabel}
+                type="button"
+              >
+                {isMinimized ? (
+                  <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 5v14M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                  </svg>
+                ) : (
+                  <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                  </svg>
+                )}
+              </button>
+              <button
+                aria-label="Cerrar detalle"
+                className="icon-btn"
+                onClick={() => actions.clearSelectionAndTools()}
+                title="Cerrar"
+                type="button"
+              >
+                <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          {isMinimized ? (
+            <div className="mfc-mini">
+              <span className="mfc-mini__title">Resultado por radio</span>
+              <button
+                className="mfc-mini__btn"
+                onClick={() => setIsMinimized(false)}
+                type="button"
+              >
+                Expandir
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="mfc__eyebrow">Herramienta INEGI</div>
+              <h4 className="mfc__title">Resultado por radio</h4>
+
+              {mergedData.error ? (
+                <div className="mfc__status-line mfc__status-line--warn">{String(mergedData.error)}</div>
+              ) : (
+                <>
+                  <div className="card-kpi">
+                    <span>Poblacion total</span>
+                    <strong>{formatPopulationMetric(totalPopulation)}</strong>
+                  </div>
+
+                  <div className="card-kpi">
+                    <span>Elementos</span>
+                    <strong>{elementsCount.toLocaleString('es-MX')}</strong>
+                  </div>
+
+                  <div className="card-kpi">
+                    <span>Radio</span>
+                    <strong>{radiusKm} km</strong>
+                  </div>
+
+                  <div className="population-extra-grid">
+                    <div className="card-kpi card-kpi--compact">
+                      <span>Mujeres</span>
+                      <strong>{formatPopulationMetric(femalePopulation)}</strong>
+                    </div>
+                    <div className="card-kpi card-kpi--compact">
+                      <span>Hombres</span>
+                      <strong>{formatPopulationMetric(malePopulation)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="mfc__subhead">Mayores de 60 años</div>
+                  <div className="population-extra-grid">
+                    <div className="card-kpi card-kpi--compact">
+                      <span>Mujeres 60+</span>
+                      <strong>{formatPopulationMetric(seniorFemalePopulation)}</strong>
+                    </div>
+                    <div className="card-kpi card-kpi--compact">
+                      <span>Hombres 60+</span>
+                      <strong>{formatPopulationMetric(seniorMalePopulation)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="mfc__subhead">Menores de 18 años</div>
+                  <div className="population-extra-grid">
+                    <div className="card-kpi card-kpi--compact">
+                      <span>Mujeres &lt;18</span>
+                      <strong>{formatPopulationMetric(minorFemalePopulation)}</strong>
+                    </div>
+                    <div className="card-kpi card-kpi--compact">
+                      <span>Hombres &lt;18</span>
+                      <strong>{formatPopulationMetric(minorMalePopulation)}</strong>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   const title =
     formatFieldValue(firstPropertyEntry(safeProperties, TITLE_KEYS)?.value) ||
-    formatFieldValue(selectedFeature.layerName) ||
+    formatFieldValue(currentFeature.layerName) ||
     'Sin nombre';
-  const layerLabel = formatFieldValue(selectedFeature.layerName) || 'Detalle de obra';
+  const programa =
+    formatFieldValue(firstPropertyEntry(safeProperties, ['PROGRAMA', 'programa'])?.value) ||
+    formatFieldValue(currentFeature.layerName) ||
+    'Detalle de obra';
+  const utopiasHint = [
+    programa,
+    formatFieldValue(currentFeature.layerName),
+    formatFieldValue(firstPropertyEntry(safeProperties, ['FRENTE', 'frente'])?.value),
+    formatFieldValue(
+      firstPropertyEntry(safeProperties, [
+        'NOMBRE DEL SITIO INTERVENIDO',
+        'NOMBRE DEL SITIO INTERVENIDO ',
+        'NOMBRE_SITIO_INTERVENIDO',
+        'nombre_sitio_intervenido',
+      ])?.value
+    ),
+  ]
+    .map((value) => normalizeText(value))
+    .filter(Boolean)
+    .join(' ');
+  const isUtopiasProgram = utopiasHint.includes('utopia');
+  const tableroLink = getTableroLink(safeProperties);
+  const normalizedTableroLink = normalizePotentialUrl(tableroLink);
+
+  // Mostrar tablero solo para Utopías y solo si la URL es segura.
+  const safeTableroLink =
+    isUtopiasProgram && isSafeUrl(normalizedTableroLink)
+      ? normalizedTableroLink
+      : null;
+  const layerLabel = formatFieldValue(currentFeature.layerName) || 'Detalle de obra';
   const estatus = formatFieldValue(firstPropertyEntry(safeProperties, ESTATUS_KEYS)?.value);
   const observaciones = formatFieldValue(
     firstPropertyEntry(safeProperties, OBSERVACIONES_KEYS)?.value
@@ -414,9 +650,20 @@ function MobileFeatureCard() {
       'true';
 
   const generalFields = collectFields(safeProperties, GENERAL_FIELD_CONFIGS);
-  const contractFields = collectFields(safeProperties, CONTRACT_FIELD_CONFIGS);
+  const contractFieldsRaw = collectFields(safeProperties, CONTRACT_FIELD_CONFIGS);
+  const hasContractStart = contractFieldsRaw.some(
+    (item) => item.label === 'Fecha de inicio'
+  );
+  const hasContractEnd = contractFieldsRaw.some(
+    (item) => item.label === 'Fecha de término'
+  );
+  const contractFields = [
+    ...contractFieldsRaw,
+    ...(hasContractStart ? [] : [{ label: 'Fecha de inicio', value: 'Sin dato' }]),
+    ...(hasContractEnd ? [] : [{ label: 'Fecha de término', value: 'Sin dato' }]),
+  ];
   const geographicFields = collectFields(safeProperties, GEOGRAPHIC_FIELD_CONFIGS);
-  const coordinatesField = resolveCoordinates(safeProperties, selectedFeature.feature);
+  const coordinatesField = resolveCoordinates(safeProperties, currentFeature.feature);
   const googleMapsField = resolveGoogleMapsField(
     safeProperties,
     coordinatesField?.coords
@@ -427,7 +674,7 @@ function MobileFeatureCard() {
 
   // BONUS: Compartir obra usando Web Share API o fallback a portapapeles
   const handleShare = () => {
-    const shareTitle = title !== 'Sin nombre' ? title : (selectedFeature.layerName || 'Obra SOBSE');
+    const shareTitle = title !== 'Sin nombre' ? title : (currentFeature.layerName || 'Obra SOBSE');
     const coordText = coordinatesField ? `\nCoordenadas: ${coordinatesField.value}` : '';
     const avanceText = Number.isFinite(avanceReal) ? `\nAvance: ${avanceReal}%` : '';
     const shareText = `${shareTitle}\n${layerLabel}\nEstatus: ${statusText}${avanceText}${coordText}`;
@@ -446,7 +693,7 @@ function MobileFeatureCard() {
     <div className="mfc" ref={panelRef}>
       <div className="mfc__inner">
         <div className="panel-header">
-          <h3 className="panel-title">Detalle de obra</h3>
+          <h3 className="panel-title">{programa}</h3>
           <div className="panel-header__actions">
             {safeTableroLink ? (
               <a
@@ -465,19 +712,38 @@ function MobileFeatureCard() {
                 Tablero
               </a>
             ) : null}
+            {!isMinimized ? (
+              <button
+                aria-label="Compartir obra"
+                className="icon-btn"
+                onClick={handleShare}
+                title="Compartir"
+                type="button"
+              >
+                <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="18" cy="5" r="3" stroke="currentColor" strokeWidth="1.8" />
+                  <circle cx="6" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                  <circle cx="18" cy="19" r="3" stroke="currentColor" strokeWidth="1.8" />
+                  <path d="m8.59 13.51 6.83 3.98M15.41 6.51 8.59 10.49" stroke="currentColor" strokeWidth="1.8" />
+                </svg>
+              </button>
+            ) : null}
             <button
-              aria-label="Compartir obra"
+              aria-label={minimizeActionLabel}
               className="icon-btn"
-              onClick={handleShare}
-              title="Compartir"
+              onClick={() => setIsMinimized((current) => !current)}
+              title={minimizeActionLabel}
               type="button"
             >
-              <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="18" cy="5" r="3" stroke="currentColor" strokeWidth="1.8" />
-                <circle cx="6" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
-                <circle cx="18" cy="19" r="3" stroke="currentColor" strokeWidth="1.8" />
-                <path d="m8.59 13.51 6.83 3.98M15.41 6.51 8.59 10.49" stroke="currentColor" strokeWidth="1.8" />
-              </svg>
+              {isMinimized ? (
+                <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 5v14M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                </svg>
+              ) : (
+                <svg fill="none" height="16" viewBox="0 0 24 24" width="16" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M5 12h14" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                </svg>
+              )}
             </button>
             <button
               aria-label="Cerrar detalle"
@@ -492,66 +758,80 @@ function MobileFeatureCard() {
             </button>
           </div>
         </div>
-        {shareToast && (
-          <div className="share-toast" role="status">
-            Información copiada al portapapeles
+        {isMinimized ? (
+          <div className="mfc-mini">
+            <span className="mfc-mini__title">{title}</span>
+            <button
+              className="mfc-mini__btn"
+              onClick={() => setIsMinimized(false)}
+              type="button"
+            >
+              Expandir
+            </button>
           </div>
+        ) : (
+          <>
+            {shareToast && (
+              <div className="share-toast" role="status">
+                Información copiada al portapapeles
+              </div>
+            )}
+            <div className="mfc__eyebrow obra-subtitle">{layerLabel}</div>
+            <h4 className="mfc__title obra-title">{title}</h4>
+            <div className={`mfc__status-line mfc__status-line--${statusTone}`}>
+              {statusText}
+            </div>
+
+            <Section
+              hasContent={
+                Number.isFinite(avanceReal) ||
+                Number.isFinite(avanceProgramado) ||
+                Boolean(estatus) ||
+                Boolean(observaciones)
+              }
+              title="Avance y estatus"
+              variant="info-section--primary"
+            >
+              <ProgressBar value={avanceReal} />
+              {renderField('Avance programado', formatPercent(avanceProgramado))}
+              {renderField('Diferencia', formatSignedDifference(diferencia))}
+              {renderField('Observaciones', observaciones)}
+            </Section>
+
+            <Section
+              hasContent={generalFields.length > 0}
+              title="Información general"
+            >
+              {generalFields.map(({ label, value }) => (
+                <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
+              ))}
+            </Section>
+
+            <Section
+              hasContent={contractFields.length > 0}
+              title="Información contractual"
+            >
+              {contractFields.map(({ label, value }) => (
+                <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
+              ))}
+            </Section>
+
+            <Section
+              hasContent={
+                geographicFields.length > 0 ||
+                Boolean(coordinatesField) ||
+                Boolean(googleMapsField)
+              }
+              title="Información geográfica"
+            >
+              {geographicFields.map(({ label, value }) => (
+                <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
+              ))}
+              {coordinatesField ? renderField(coordinatesField.label, coordinatesField.value) : null}
+              {googleMapsField ? renderField(googleMapsField.label, googleMapsField.value) : null}
+            </Section>
+          </>
         )}
-        <div className="mfc__eyebrow obra-subtitle">{layerLabel}</div>
-        <h4 className="mfc__title obra-title">{title}</h4>
-        <div className={`mfc__status-line mfc__status-line--${statusTone}`}>
-          {statusText}
-        </div>
-
-        <Section
-          hasContent={
-            Number.isFinite(avanceReal) ||
-            Number.isFinite(avanceProgramado) ||
-            Boolean(estatus) ||
-            Boolean(observaciones)
-          }
-          title="Avance y estatus"
-          variant="info-section--primary"
-        >
-          <ProgressBar value={avanceReal} />
-          {renderField('Avance programado', formatPercent(avanceProgramado))}
-          {renderField('Diferencia', formatSignedDifference(diferencia))}
-          {renderField('Estatus', estatus)}
-          {renderField('Observaciones', observaciones)}
-        </Section>
-
-        <Section
-          hasContent={generalFields.length > 0}
-          title="Información general"
-        >
-          {generalFields.map(({ label, value }) => (
-            <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
-          ))}
-        </Section>
-
-        <Section
-          hasContent={contractFields.length > 0}
-          title="Información contractual"
-        >
-          {contractFields.map(({ label, value }) => (
-            <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
-          ))}
-        </Section>
-
-        <Section
-          hasContent={
-            geographicFields.length > 0 ||
-            Boolean(coordinatesField) ||
-            Boolean(googleMapsField)
-          }
-          title="Información geográfica"
-        >
-          {geographicFields.map(({ label, value }) => (
-            <React.Fragment key={label}>{renderField(label, value)}</React.Fragment>
-          ))}
-          {coordinatesField ? renderField(coordinatesField.label, coordinatesField.value) : null}
-          {googleMapsField ? renderField(googleMapsField.label, googleMapsField.value) : null}
-        </Section>
       </div>
     </div>
   );

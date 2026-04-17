@@ -1621,7 +1621,7 @@ async function getTableMetaDirect(tableName) {
 // A mayor tolerancia → geometría más simple → archivo más pequeño → carga más rápida.
 // A menor tolerancia → más detalle → archivo más pesado.
 function getSimplifyTolerance(tableName) {
-  return 0.00005;
+  return Number(process.env.GIS_SIMPLIFY_TOLERANCE || 0.0001);
 }
 
 // ── Construcción del GeoJSON desde PostGIS ────────────────────────────────────
@@ -1823,13 +1823,13 @@ async function handleLayerTable(req, res) {
     if (responseEtag) {
       res.set("ETag", responseEtag);
       if (matchesIfNoneMatch(req.get("if-none-match"), responseEtag)) {
-        res.set("Cache-Control", "public, max-age=120");
+        res.set("Cache-Control", "public, max-age=600");
         res.set("X-GIS-Cache", cacheStatus);
         res.status(304).end();
         return;
       }
     }
-    res.set("Cache-Control", "public, max-age=120");
+    res.set("Cache-Control", "public, max-age=600");
     res.set("X-GIS-Cache", cacheStatus);
     res.json(geojson);
   } catch (error) {
