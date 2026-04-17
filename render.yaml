@@ -27,6 +27,6 @@ services:
       - key: PGPASSWORD
         sync: false
       - key: CACHE_INVALIDATE_TOKEN
-        generateValue: true
+        sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false

@@ -12,38 +12,99 @@
 //   POST /cache/invalidate → fuerza recarga del catálogo
 // ─────────────────────────────────────────────────────────────────────────────
 
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import dotenv from 'dotenv';
-import cors from 'cors';
-import express from 'express';
-import compression from 'compression';
-import { pool, query } from './db.js';
+import path from "node:path";
+import fs from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
+import cors from "cors";
+import express from "express";
+import compression from "compression";
+import { pool, query } from "./db.js";
+import {
+  PopulationAnalysisEngine,
+  buildPopulationFileCandidates,
+} from "./populationEngine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.join(__dirname, '.env') });
+dotenv.config({ path: path.join(__dirname, ".env") });
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
-app.set('trust proxy', 1);
+app.set("trust proxy", 1);
 
 // Schema de PostgreSQL donde viven todas las tablas de obra pública
-const GIS_SCHEMA = process.env.PGSCHEMA || 'sig_sobse';
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const GIS_SCHEMA = process.env.PGSCHEMA || "sig_sobse";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const ENABLE_BACKEND_DEBUG =
-  !IS_PRODUCTION || String(process.env.GIS_DEBUG || '').toLowerCase() === 'true';
+  !IS_PRODUCTION ||
+  String(process.env.GIS_DEBUG || "").toLowerCase() === "true";
 const CACHE_INVALIDATE_TOKEN = String(
-  process.env.CACHE_INVALIDATE_TOKEN || ''
+  process.env.CACHE_INVALIDATE_TOKEN || "",
+).trim();
+const CORS_ALLOWED_ORIGINS = String(
+  process.env.CORS_ALLOWED_ORIGINS || "",
 ).trim();
 const SERVE_FRONTEND =
-  String(process.env.SERVE_FRONTEND || 'true').toLowerCase() !== 'false';
-const FRONTEND_BUILD_DIR = path.resolve(__dirname, '../frontend/build');
-const FRONTEND_INDEX_FILE = path.join(FRONTEND_BUILD_DIR, 'index.html');
-const HAS_FRONTEND_BUILD =
-  SERVE_FRONTEND && fs.existsSync(FRONTEND_INDEX_FILE);
+  String(process.env.SERVE_FRONTEND || "true").toLowerCase() !== "false";
+const FRONTEND_BUILD_DIR = path.resolve(__dirname, "../frontend/build");
+const FRONTEND_INDEX_FILE = path.join(FRONTEND_BUILD_DIR, "index.html");
+const HAS_FRONTEND_BUILD = SERVE_FRONTEND && fs.existsSync(FRONTEND_INDEX_FILE);
+const POPULATION_MAX_RENDER_FEATURES = Math.max(
+  0,
+  Number(process.env.POPULATION_MAX_RENDER_FEATURES || 0),
+);
+const API_REQUEST_TIMEOUT_MS = Math.max(
+  2000,
+  Number(process.env.GIS_REQUEST_TIMEOUT_MS || 25000),
+);
+const ENABLE_RATE_LIMIT =
+  String(process.env.GIS_ENABLE_RATE_LIMIT || "true").toLowerCase() !== "false";
+const RATE_LIMIT_WINDOW_MS = Math.max(
+  1000,
+  Number(process.env.GIS_RATE_LIMIT_WINDOW_MS || 60 * 1000),
+);
+const RATE_LIMIT_MAX_REQUESTS = Math.max(
+  10,
+  Number(process.env.GIS_RATE_LIMIT_MAX_REQUESTS || 180),
+);
+const KPI_HEALTH_CHECK_TTL_MS = Math.max(
+  5000,
+  Number(process.env.GIS_KPI_HEALTH_CHECK_TTL_MS || 60 * 1000),
+);
+const populationFileCandidates = buildPopulationFileCandidates({
+  rootDir: path.resolve(__dirname, ".."),
+  backendDir: __dirname,
+  explicitPath: process.env.POPULATION_GEOJSON_PATH,
+});
+const populationAnalysisEngine = new PopulationAnalysisEngine({
+  fileCandidates: populationFileCandidates,
+});
+
+function normalizeOrigin(value) {
+  return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+const allowedOrigins = CORS_ALLOWED_ORIGINS.split(",")
+  .map(normalizeOrigin)
+  .filter(Boolean);
+
+const corsOptions = allowedOrigins.length
+  ? {
+      origin: (origin, callback) => {
+        // Permitir requests sin Origin (curl, health checks internos, server-to-server)
+        if (!origin) {
+          callback(null, true);
+          return;
+        }
+
+        const normalizedOrigin = normalizeOrigin(origin);
+        callback(null, allowedOrigins.includes(normalizedOrigin));
+      },
+    }
+  : { origin: "*" };
 
 // ── Middlewares globales ──────────────────────────────────────────────────────
 
@@ -51,10 +112,81 @@ const HAS_FRONTEND_BUILD =
 // Reduce el tamaño del JSON hasta un 70-80% → capas cargan mucho más rápido.
 app.use(compression());
 
-// CORS abierto — el frontend en Hostinger y el backend en Render son dominios distintos.
-app.use(cors({ origin: '*' }));
+// CORS configurable por variable de entorno CORS_ALLOWED_ORIGINS.
+// Si no se define, queda abierto para facilitar entornos de prueba.
+app.use(cors(corsOptions));
 
 app.use(express.json());
+
+// Middleware operativo: request-id, rate-limit, timeout por request y log estructurado.
+app.use((req, res, next) => {
+  const requestId = randomUUID();
+  const startedAtHr = process.hrtime.bigint();
+  const startedAtMs = Date.now();
+  const requestPath = String(req.path || req.originalUrl || "");
+  const isApiRequest = isApiLikePath(requestPath);
+
+  req.requestId = requestId;
+  res.set("X-Request-Id", requestId);
+
+  const timeoutId = isApiRequest
+    ? setTimeout(() => {
+        if (res.headersSent) return;
+        res.status(503).json({
+          ok: false,
+          error: "Tiempo de espera agotado en la API.",
+          request_id: requestId,
+          timeout_ms: API_REQUEST_TIMEOUT_MS,
+        });
+      }, API_REQUEST_TIMEOUT_MS)
+    : null;
+
+  const clearTimeoutGuard = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+  };
+
+  if (isApiRequest && ENABLE_RATE_LIMIT) {
+    const rateLimit = consumeRateLimit(req);
+    res.set("X-RateLimit-Limit", String(RATE_LIMIT_MAX_REQUESTS));
+    res.set("X-RateLimit-Remaining", String(rateLimit.remaining));
+    if (rateLimit.reset_ms != null) {
+      res.set("X-RateLimit-Reset", String(Math.ceil(rateLimit.reset_ms / 1000)));
+    }
+
+    if (!rateLimit.allowed) {
+      clearTimeoutGuard();
+      const retryAfterSec = Math.max(1, Math.ceil((rateLimit.reset_ms || 0) / 1000));
+      res.set("Retry-After", String(retryAfterSec));
+      res.status(429).json({
+        ok: false,
+        error: "Demasiadas solicitudes. Intenta nuevamente en unos segundos.",
+        request_id: requestId,
+        retry_after_seconds: retryAfterSec,
+      });
+      return;
+    }
+  }
+
+  res.on("finish", () => {
+    clearTimeoutGuard();
+    const durationMs = Number(process.hrtime.bigint() - startedAtHr) / 1e6;
+    const level = res.statusCode >= 500 ? "error" : "info";
+    if (!isApiRequest && !ENABLE_BACKEND_DEBUG) return;
+    logStructuredEvent(level, "http.request", {
+      request_id: requestId,
+      method: req.method,
+      path: req.originalUrl || req.url,
+      status: res.statusCode,
+      duration_ms: Number(durationMs.toFixed(1)),
+      ip: getClientIpAddress(req),
+      user_agent: String(req.get("user-agent") || ""),
+      started_at_epoch_ms: startedAtMs,
+    });
+  });
+
+  res.on("close", clearTimeoutGuard);
+  next();
+});
 
 // ── Caché en memoria del catálogo de tablas ───────────────────────────────────
 // Escanear information_schema cada vez que alguien pide una capa es lento.
@@ -64,22 +196,55 @@ let catalogCache = null;
 let catalogCacheTime = 0;
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos en milisegundos
 const DEFAULT_LAYER_CACHE_TTL_MS =
-  process.env.NODE_ENV === 'production' ? 5 * 60 * 1000 : 60 * 1000;
+  process.env.NODE_ENV === "production" ? 5 * 60 * 1000 : 60 * 1000;
 const LAYER_CACHE_TTL_MS = Math.max(
   15000,
-  Number(process.env.GIS_LAYER_CACHE_TTL_MS || DEFAULT_LAYER_CACHE_TTL_MS)
+  Number(process.env.GIS_LAYER_CACHE_TTL_MS || DEFAULT_LAYER_CACHE_TTL_MS),
+);
+const KPI_CACHE_TTL_MS = Math.max(
+  15000,
+  Number(process.env.GIS_KPI_CACHE_TTL_MS || 3 * 60 * 1000),
 );
 const CATALOG_SUMMARY_CONCURRENCY = Math.max(
   1,
-  Number(process.env.GIS_CATALOG_SUMMARY_CONCURRENCY || 2)
+  Number(process.env.GIS_CATALOG_SUMMARY_CONCURRENCY || 2),
+);
+const KPI_SUMMARY_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.GIS_KPI_SUMMARY_CONCURRENCY || 4),
 );
 const layerGeoJsonCache = new Map();
 const layerGeoJsonInFlight = new Map();
+const rateLimitBuckets = new Map();
+let kpiSummaryCache = null;
+let kpiSummaryCacheTime = 0;
+let kpiRouteHealthCache = {
+  checked_at: null,
+  checked_at_epoch_ms: 0,
+  ok: null,
+  source: "not_checked",
+  error: null,
+  total_obras: null,
+};
+let lastRateLimitSweepAt = 0;
 
 // Borra el caché para forzar una nueva consulta a PostgreSQL
 function invalidateCatalogCache() {
   catalogCache = null;
   catalogCacheTime = 0;
+}
+
+function invalidateKpiSummaryCache() {
+  kpiSummaryCache = null;
+  kpiSummaryCacheTime = 0;
+  kpiRouteHealthCache = {
+    checked_at: null,
+    checked_at_epoch_ms: 0,
+    ok: null,
+    source: "invalidated",
+    error: null,
+    total_obras: null,
+  };
 }
 
 function invalidateLayerGeoJsonCache(tableName = null) {
@@ -99,6 +264,12 @@ function getValidCatalogCache() {
   return catalogCache;
 }
 
+function getValidKpiSummaryCache() {
+  if (!kpiSummaryCache) return null;
+  if (Date.now() - kpiSummaryCacheTime >= KPI_CACHE_TTL_MS) return null;
+  return kpiSummaryCache;
+}
+
 function getCachedLayerGeoJson(tableName) {
   const cached = layerGeoJsonCache.get(tableName);
   if (!cached) return null;
@@ -108,7 +279,70 @@ function getCachedLayerGeoJson(tableName) {
     return null;
   }
 
-  return cached.geojson;
+  return cached;
+}
+
+function parseJsonOrNull(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'object') return value;
+
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function buildGeoJsonFeatureFromRow(row, geometryColumn) {
+  const properties = { ...row };
+  let geometry = null;
+
+  if (properties.geometry !== undefined) {
+    geometry = parseJsonOrNull(properties.geometry);
+  }
+
+  if (!geometry && properties.geom !== undefined) {
+    geometry = parseJsonOrNull(properties.geom);
+  }
+
+  if (!geometry && geometryColumn && properties[geometryColumn] !== undefined) {
+    geometry = parseJsonOrNull(properties[geometryColumn]);
+  }
+
+  if (!geometry && properties.X != null && properties.Y != null) {
+    const x = Number(properties.X);
+    const y = Number(properties.Y);
+    if (!Number.isNaN(x) && !Number.isNaN(y)) {
+      geometry = {
+        type: 'Point',
+        coordinates: [x, y],
+      };
+    }
+  }
+
+  if (geometryColumn) {
+    delete properties[geometryColumn];
+  }
+  delete properties.geometry;
+  delete properties.geom;
+  delete properties.geometry_geojson;
+
+  return {
+    type: 'Feature',
+    geometry,
+    properties,
+  };
+}
+
+function buildGeoJsonFeatureCollection(rows, geometryColumn) {
+  return {
+    type: 'FeatureCollection',
+    features: (rows || []).map((row) => buildGeoJsonFeatureFromRow(row, geometryColumn)),
+  };
 }
 
 function logBackend(...args) {
@@ -122,35 +356,187 @@ function logBackendError(...args) {
 }
 
 function getInvalidateRequestToken(req) {
-  const headerToken = String(req.get('x-cache-token') || '').trim();
-  const authHeader = String(req.get('authorization') || '').trim();
+  const headerToken = String(req.get("x-cache-token") || "").trim();
+  const authHeader = String(req.get("authorization") || "").trim();
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
-  return headerToken || String(bearerMatch?.[1] || '').trim();
+  return headerToken || String(bearerMatch?.[1] || "").trim();
 }
 
 function getServiceStatus() {
   return {
     ok: true,
-    service: 'sigsobse-backend',
-    message: 'API GIS operativa',
+    service: "sigsobse-backend",
+    message: "API GIS operativa",
     serve_frontend: HAS_FRONTEND_BUILD,
     schema: GIS_SCHEMA,
   };
 }
 
+function buildPayloadHash(payload) {
+  return createHash("sha1").update(JSON.stringify(payload)).digest("hex");
+}
+
+function buildWeakEtag(payload) {
+  return `W/"${buildPayloadHash(payload)}"`;
+}
+
+function matchesIfNoneMatch(ifNoneMatchHeader, etag) {
+  const rawHeader = String(ifNoneMatchHeader || "").trim();
+  if (!rawHeader) return false;
+  if (rawHeader === "*") return true;
+
+  const candidates = rawHeader.split(",").map((value) => value.trim());
+  return candidates.includes(etag);
+}
+
+function getClientIpAddress(req) {
+  const forwardedFor = String(req.get("x-forwarded-for") || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)[0];
+  return (
+    forwardedFor ||
+    req.ip ||
+    req.socket?.remoteAddress ||
+    "unknown"
+  );
+}
+
+function logStructuredEvent(level, event, details = {}) {
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    event,
+    ...details,
+  };
+  const serialized = JSON.stringify(payload);
+  if (level === "error") {
+    console.error(serialized);
+    return;
+  }
+  console.log(serialized);
+}
+
+function sweepRateLimitBuckets(nowMs) {
+  if (nowMs - lastRateLimitSweepAt < RATE_LIMIT_WINDOW_MS) return;
+  lastRateLimitSweepAt = nowMs;
+
+  for (const [bucketKey, bucket] of rateLimitBuckets.entries()) {
+    if (nowMs - bucket.window_start_ms >= RATE_LIMIT_WINDOW_MS) {
+      rateLimitBuckets.delete(bucketKey);
+    }
+  }
+}
+
+function consumeRateLimit(req) {
+  if (!ENABLE_RATE_LIMIT) {
+    return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS };
+  }
+
+  const nowMs = Date.now();
+  sweepRateLimitBuckets(nowMs);
+
+  const ip = getClientIpAddress(req);
+  const pathKey = String(req.path || "").split("?")[0] || "/";
+  const bucketKey = `${ip}::${pathKey}`;
+  const currentBucket = rateLimitBuckets.get(bucketKey);
+
+  if (!currentBucket || nowMs - currentBucket.window_start_ms >= RATE_LIMIT_WINDOW_MS) {
+    const nextBucket = {
+      window_start_ms: nowMs,
+      request_count: 1,
+    };
+    rateLimitBuckets.set(bucketKey, nextBucket);
+    return {
+      allowed: true,
+      remaining: Math.max(0, RATE_LIMIT_MAX_REQUESTS - nextBucket.request_count),
+      reset_ms: RATE_LIMIT_WINDOW_MS,
+    };
+  }
+
+  if (currentBucket.request_count >= RATE_LIMIT_MAX_REQUESTS) {
+    const resetMs = Math.max(
+      0,
+      RATE_LIMIT_WINDOW_MS - (nowMs - currentBucket.window_start_ms),
+    );
+    return { allowed: false, remaining: 0, reset_ms: resetMs };
+  }
+
+  currentBucket.request_count += 1;
+  return {
+    allowed: true,
+    remaining: Math.max(0, RATE_LIMIT_MAX_REQUESTS - currentBucket.request_count),
+    reset_ms: Math.max(
+      0,
+      RATE_LIMIT_WINDOW_MS - (nowMs - currentBucket.window_start_ms),
+    ),
+  };
+}
+
 function isApiLikePath(requestPath) {
-  return /^\/(api(?:\/|$)|test|layers|layer(?:\/|$)|cache(?:\/|$)|health(?:\/|$))/.test(
-    requestPath
+  return /^\/(api(?:\/|$)|test|search|layers|layer(?:\/|$)|cache(?:\/|$)|health(?:\/|$)|population(?:\/|$)|kpis?(?:\/|$))/.test(
+    requestPath,
   );
 }
 
 function shouldServeFrontendApp(req) {
-  if (!HAS_FRONTEND_BUILD || req.method !== 'GET') return false;
+  if (!HAS_FRONTEND_BUILD || req.method !== "GET") return false;
   if (isApiLikePath(req.path)) return false;
   if (path.extname(req.path)) return false;
 
-  const acceptHeader = String(req.get('accept') || '').toLowerCase();
-  return acceptHeader.includes('text/html') || acceptHeader.includes('*/*');
+  const acceptHeader = String(req.get("accept") || "").toLowerCase();
+  return acceptHeader.includes("text/html") || acceptHeader.includes("*/*");
+}
+
+function sendJsonWithEtag(req, res, payload, cacheControl = null) {
+  const etag = buildWeakEtag(payload);
+  res.set("ETag", etag);
+  if (cacheControl) {
+    res.set("Cache-Control", cacheControl);
+  }
+
+  if (matchesIfNoneMatch(req.get("if-none-match"), etag)) {
+    res.status(304).end();
+    return;
+  }
+
+  res.json(payload);
+}
+
+async function getKpiRouteHealth(options = {}) {
+  const { force = false } = options;
+  const nowMs = Date.now();
+
+  if (
+    !force &&
+    kpiRouteHealthCache.checked_at_epoch_ms &&
+    nowMs - kpiRouteHealthCache.checked_at_epoch_ms < KPI_HEALTH_CHECK_TTL_MS
+  ) {
+    return kpiRouteHealthCache;
+  }
+
+  try {
+    const summary = await getKpiSummaryCatalog();
+    kpiRouteHealthCache = {
+      checked_at: new Date().toISOString(),
+      checked_at_epoch_ms: nowMs,
+      ok: true,
+      source: "kpi_summary",
+      error: null,
+      total_obras: Number(summary?.totals?.total_obras || 0),
+    };
+  } catch (error) {
+    kpiRouteHealthCache = {
+      checked_at: new Date().toISOString(),
+      checked_at_epoch_ms: nowMs,
+      ok: false,
+      source: "kpi_summary",
+      error: String(error?.message || error || "Error desconocido"),
+      total_obras: null,
+    };
+  }
+
+  return kpiRouteHealthCache;
 }
 
 // ── Funciones de seguridad SQL ────────────────────────────────────────────────
@@ -160,10 +546,10 @@ function shouldServeFrontendApp(req) {
 // igual que los valores, por eso necesitamos esta función manual.
 // Ejemplo: "OBRAS PUBLICAS" → `"OBRAS PUBLICAS"` (comillas dobles internas duplicadas)
 function quoteIdentifier(value) {
-  const normalized = String(value || '');
+  const normalized = String(value || "");
 
-  if (!normalized.trim() || normalized.includes('\0')) {
-    throw new Error('Identificador SQL inválido.');
+  if (!normalized.trim() || normalized.includes("\0")) {
+    throw new Error("Identificador SQL inválido.");
   }
 
   return `"${normalized.replace(/"/g, '""')}"`;
@@ -176,32 +562,156 @@ function quoteIdentifier(value) {
 // y udt_name = 'geometry' (tipo definido por la extensión PostGIS).
 function isGeometryColumn(column) {
   return (
-    String(column?.column_name || '').toLowerCase() === 'geom' &&
-    String(column?.data_type || '').toUpperCase() === 'USER-DEFINED' &&
-    String(column?.udt_name || '').toLowerCase() === 'geometry'
+    String(column?.column_name || "").toLowerCase() === "geom" &&
+    String(column?.data_type || "").toUpperCase() === "USER-DEFINED" &&
+    String(column?.udt_name || "").toLowerCase() === "geometry"
   );
 }
 
 function normalizeCatalogKey(value) {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
+    .replace(/[^A-Z0-9]/g, "")
     .trim();
 }
 
-const DG_COLUMN_CANDIDATES = new Set([
-  'DG',
-  'DIRECCIONGENERAL',
-]);
+function normalizeDgKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isOperationalDg(value) {
+  const normalized = normalizeDgKey(value);
+  if (!normalized || normalized === "SIN DG") return false;
+  if (normalized.includes("CARTOGRAFIA BASE")) return false;
+  return normalized.startsWith("DG") || normalized === "ILIFE";
+}
+
+function isPointGeometryType(value) {
+  const geometryType = String(value || "").toUpperCase().trim();
+  if (!geometryType) return false;
+  return geometryType.includes("POINT");
+}
+
+const DG_COLUMN_CANDIDATES = ["DG", "DIRECCIONGENERAL"];
+const STATUS_COLUMN_CANDIDATES = [
+  "FESTATUS",
+  "ESTATUS",
+  "ESTADO",
+  "STATUS",
+];
+const STRICT_WORK_ID_COLUMN_CANDIDATES = [
+  "ID_OBRA",
+  "IDOBRA",
+  "CVE_OBRA",
+  "CVEOBRA",
+  "OBRA_ID",
+  "OBRAID",
+  "IDOBRAS",
+  "IDPROYECTO",
+  "CLAVEOBRA",
+  "FOLIOOBRA",
+  "NUMOBRA",
+  "NOOBRA",
+  "NROOBRA",
+];
+const GENERIC_WORK_ID_COLUMN_CANDIDATES = [
+  "ID",
+  "IDREGISTRO",
+  "OBJECTID",
+  "OBJECTID1",
+  "OBJECTID2",
+  "GID",
+  "FID",
+];
+const ALLOW_GENERIC_WORK_ID_COLUMNS =
+  String(process.env.GIS_ALLOW_GENERIC_WORK_ID_COLUMNS || "").toLowerCase() ===
+  "true";
 
 function findColumnByCandidates(columns, candidates) {
-  return (
-    (columns || []).find((column) =>
-      candidates.has(normalizeCatalogKey(column?.column_name))
-    ) || null
+  const candidateRank = new Map(
+    Array.from(candidates || []).map((candidate, index) => [
+      normalizeCatalogKey(candidate),
+      index,
+    ]),
   );
+  if (!candidateRank.size) return null;
+
+  let bestColumn = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const column of columns || []) {
+    const normalizedColumn = normalizeCatalogKey(column?.column_name);
+    if (!candidateRank.has(normalizedColumn)) continue;
+    const rank = candidateRank.get(normalizedColumn);
+    if (rank < bestRank) {
+      bestColumn = column;
+      bestRank = rank;
+    }
+  }
+
+  return bestColumn || null;
+}
+
+function resolveWorkIdColumn(columns) {
+  const strictColumn = findColumnByCandidates(
+    columns,
+    STRICT_WORK_ID_COLUMN_CANDIDATES,
+  )?.column_name;
+  if (strictColumn) return strictColumn;
+
+  if (!ALLOW_GENERIC_WORK_ID_COLUMNS) return null;
+  return findColumnByCandidates(
+    columns,
+    GENERIC_WORK_ID_COLUMN_CANDIDATES,
+  )?.column_name;
+}
+
+function buildEmptyStatusCounters() {
+  return {
+    entregado: 0,
+    terminado: 0,
+    proceso: 0,
+    sin_iniciar: 0,
+    otro: 0,
+  };
+}
+
+function buildStatusKeyCaseSql(statusColumnSql) {
+  if (!statusColumnSql) return "NULL";
+  return `
+    CASE
+      WHEN ${statusColumnSql}::text ILIKE '%entregad%' THEN 'entregado'
+      WHEN ${statusColumnSql}::text ILIKE '%terminad%' OR ${statusColumnSql}::text ILIKE '%concluid%' OR ${statusColumnSql}::text ILIKE '%finaliz%' THEN 'terminado'
+      WHEN ${statusColumnSql}::text ILIKE '%sin iniciar%' OR ${statusColumnSql}::text ILIKE '%no inici%' THEN 'sin_iniciar'
+      WHEN ${statusColumnSql}::text ILIKE '%proceso%' OR ${statusColumnSql}::text ILIKE '%ejecuci%' OR ${statusColumnSql}::text ILIKE '%avance%' THEN 'proceso'
+      ELSE NULL
+    END
+  `;
+}
+
+function buildNormalizedWorkIdSql(workIdColumnSql) {
+  if (!workIdColumnSql) return "NULL";
+  const normalizedAlnumSql = `REGEXP_REPLACE(UPPER(BTRIM(${workIdColumnSql}::text)), '[^A-Z0-9]', '', 'g')`;
+  const normalizedDigitsSql = `REGEXP_REPLACE(${normalizedAlnumSql}, '[^0-9]', '', 'g')`;
+  return `
+    NULLIF(
+      CASE
+        -- Si contiene una cadena numérica "robusta", la usamos como canónica.
+        -- Esto unifica casos como OB-001234 vs 1234.
+        WHEN LENGTH(${normalizedDigitsSql}) >= 4 THEN
+          COALESCE(NULLIF(LTRIM(${normalizedDigitsSql}, '0'), ''), '0')
+        ELSE
+          ${normalizedAlnumSql}
+      END,
+      ''
+    )
+  `;
 }
 
 async function getTableEstimatedFeatureCount(tableName) {
@@ -215,7 +725,7 @@ async function getTableEstimatedFeatureCount(tableName) {
         AND c.relname = $2
       LIMIT 1
     `,
-    [GIS_SCHEMA, tableName]
+    [GIS_SCHEMA, tableName],
   );
 
   return Number(result.rows[0]?.estimated_count || 0);
@@ -234,7 +744,7 @@ async function getTableEstimatedBbox(tableName, geometryColumn) {
       ) AS ext
       WHERE extent_box IS NOT NULL
     `,
-    [GIS_SCHEMA, tableName, geometryColumn]
+    [GIS_SCHEMA, tableName, geometryColumn],
   );
 
   const row = result.rows[0];
@@ -245,9 +755,7 @@ async function getTableEstimatedBbox(tableName, geometryColumn) {
   const east = Number(row.east);
   const north = Number(row.north);
 
-  if (
-    [west, south, east, north].some((value) => !Number.isFinite(value))
-  ) {
+  if ([west, south, east, north].some((value) => !Number.isFinite(value))) {
     return null;
   }
 
@@ -267,10 +775,10 @@ async function getTableSampleTextValue(tableName, columnName) {
       WHERE ${safeColumn} IS NOT NULL
         AND BTRIM(${safeColumn}::text) <> ''
       LIMIT 1
-    `
+    `,
   );
 
-  return String(result.rows[0]?.value || '').trim() || null;
+  return String(result.rows[0]?.value || "").trim() || null;
 }
 
 async function getLayerCatalogSummary(tableName, geometryColumn, columns) {
@@ -289,6 +797,323 @@ async function getLayerCatalogSummary(tableName, geometryColumn, columns) {
   };
 }
 
+async function getTableKpiSummary(tableName, statusColumn, workIdColumn) {
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const safeTable = quoteIdentifier(tableName);
+  const safeWorkIdColumn = workIdColumn ? quoteIdentifier(workIdColumn) : null;
+  const normalizedWorkIdSql = safeWorkIdColumn
+    ? buildNormalizedWorkIdSql(safeWorkIdColumn)
+    : "NULL";
+
+  if (!statusColumn) {
+    const result = safeWorkIdColumn
+      ? await query(
+          `
+            WITH base AS (
+              SELECT
+                ${normalizedWorkIdSql} AS work_id
+              FROM ${safeSchema}.${safeTable}
+            )
+            SELECT
+              COUNT(DISTINCT work_id)::bigint AS total
+            FROM base
+            WHERE work_id IS NOT NULL
+          `
+        )
+      : await query(
+          `
+            SELECT COUNT(*)::bigint AS total
+            FROM ${safeSchema}.${safeTable}
+          `
+        );
+
+    return {
+      table_name: tableName,
+      status_column: null,
+      work_id_column: workIdColumn || null,
+      total: Number(result.rows[0]?.total || 0),
+      ...buildEmptyStatusCounters(),
+    };
+  }
+
+  const safeStatusColumn = quoteIdentifier(statusColumn);
+  const statusCaseSql = buildStatusKeyCaseSql(safeStatusColumn);
+  const result = safeWorkIdColumn
+    ? await query(
+        `
+          WITH normalized AS (
+            SELECT
+              ${statusCaseSql} AS status_key,
+              ${normalizedWorkIdSql} AS work_id
+            FROM ${safeSchema}.${safeTable}
+          )
+          SELECT
+            COUNT(DISTINCT work_id) FILTER (WHERE work_id IS NOT NULL)::bigint AS total,
+            COUNT(DISTINCT work_id) FILTER (WHERE status_key = 'entregado' AND work_id IS NOT NULL)::bigint AS entregado,
+            COUNT(DISTINCT work_id) FILTER (WHERE status_key = 'terminado' AND work_id IS NOT NULL)::bigint AS terminado,
+            COUNT(DISTINCT work_id) FILTER (WHERE status_key = 'proceso' AND work_id IS NOT NULL)::bigint AS proceso,
+            COUNT(DISTINCT work_id) FILTER (WHERE status_key = 'sin_iniciar' AND work_id IS NOT NULL)::bigint AS sin_iniciar
+          FROM normalized
+        `
+      )
+    : await query(
+        `
+          WITH normalized AS (
+            SELECT
+              ${statusCaseSql} AS status_key
+            FROM ${safeSchema}.${safeTable}
+          )
+          SELECT
+            COUNT(*)::bigint AS total,
+            COUNT(*) FILTER (WHERE status_key = 'entregado')::bigint AS entregado,
+            COUNT(*) FILTER (WHERE status_key = 'terminado')::bigint AS terminado,
+            COUNT(*) FILTER (WHERE status_key = 'proceso')::bigint AS proceso,
+            COUNT(*) FILTER (WHERE status_key = 'sin_iniciar')::bigint AS sin_iniciar
+          FROM normalized
+        `
+      );
+
+  const row = result.rows[0] || {};
+  const total = Number(row.total || 0);
+  const entregado = Number(row.entregado || 0);
+  const terminado = Number(row.terminado || 0);
+  const proceso = Number(row.proceso || 0);
+  const sinIniciar = Number(row.sin_iniciar || 0);
+  const classified = entregado + terminado + proceso + sinIniciar;
+
+  return {
+    table_name: tableName,
+    status_column: statusColumn,
+    work_id_column: workIdColumn || null,
+    total,
+    entregado,
+    terminado,
+    proceso,
+    sin_iniciar: sinIniciar,
+    otro: Math.max(0, total - classified),
+  };
+}
+
+async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const unionQueries = [];
+
+  targetTables.forEach((table) => {
+    const tableName = String(table?.table_name || "").trim();
+    if (!tableName) return;
+
+    const columns = columnsByTable.get(tableName) || [];
+    const workIdColumn = resolveWorkIdColumn(columns);
+    if (!workIdColumn) return;
+
+    const statusColumn = findColumnByCandidates(
+      columns,
+      STATUS_COLUMN_CANDIDATES
+    )?.column_name;
+
+    const safeTable = quoteIdentifier(tableName);
+    const safeWorkIdColumn = quoteIdentifier(workIdColumn);
+    const normalizedWorkIdSql = buildNormalizedWorkIdSql(safeWorkIdColumn);
+    const statusCaseSql = statusColumn
+      ? buildStatusKeyCaseSql(quoteIdentifier(statusColumn))
+      : "NULL";
+
+    unionQueries.push(`
+      SELECT
+        ${normalizedWorkIdSql} AS work_id,
+        ${statusCaseSql} AS status_key
+      FROM ${safeSchema}.${safeTable}
+      WHERE ${safeWorkIdColumn} IS NOT NULL
+        AND BTRIM(${safeWorkIdColumn}::text) <> ''
+    `);
+  });
+
+  if (!unionQueries.length) return null;
+
+  const result = await query(`
+    WITH all_rows AS (
+      ${unionQueries.join("\nUNION ALL\n")}
+    ),
+    normalized AS (
+      SELECT
+        work_id,
+        CASE
+          WHEN status_key = 'entregado' THEN 4
+          WHEN status_key = 'terminado' THEN 3
+          WHEN status_key = 'proceso' THEN 2
+          WHEN status_key = 'sin_iniciar' THEN 1
+          ELSE 0
+        END AS status_rank
+      FROM all_rows
+      WHERE work_id IS NOT NULL
+    ),
+    ranked AS (
+      SELECT
+        work_id,
+        MAX(status_rank) AS status_rank
+      FROM normalized
+      GROUP BY work_id
+    )
+    SELECT
+      COUNT(*)::bigint AS total_obras,
+      COUNT(*) FILTER (WHERE status_rank = 4)::bigint AS entregadas,
+      COUNT(*) FILTER (WHERE status_rank = 3)::bigint AS terminadas,
+      COUNT(*) FILTER (WHERE status_rank = 2)::bigint AS en_proceso,
+      COUNT(*) FILTER (WHERE status_rank = 1)::bigint AS sin_iniciar,
+      COUNT(*) FILTER (WHERE status_rank = 0)::bigint AS otro
+    FROM ranked
+  `);
+
+  const row = result.rows[0] || {};
+  return {
+    total_obras: Number(row.total_obras || 0),
+    entregadas: Number(row.entregadas || 0),
+    terminadas: Number(row.terminadas || 0),
+    en_proceso: Number(row.en_proceso || 0),
+    sin_iniciar: Number(row.sin_iniciar || 0),
+    otro: Number(row.otro || 0),
+  };
+}
+
+async function getKpiSummaryCatalog() {
+  const validCachedSummary = getValidKpiSummaryCache();
+  if (validCachedSummary) return validCachedSummary;
+
+  const catalog = await getLayerCatalog();
+  const schemaColumns = await getSchemaColumns();
+  const columnsByTable = schemaColumns.reduce((accumulator, column) => {
+    const tableName = String(column?.table_name || "").trim();
+    if (!tableName) return accumulator;
+    const currentColumns = accumulator.get(tableName) || [];
+    currentColumns.push(column);
+    accumulator.set(tableName, currentColumns);
+    return accumulator;
+  }, new Map());
+
+  const targetTables = catalog.filter(
+    (table) =>
+      table?.has_geom &&
+      isOperationalDg(table?.dg) &&
+      isPointGeometryType(table?.geometry_type)
+  );
+
+  const tableCandidates = targetTables.map((table) => {
+    const tableName = String(table?.table_name || "").trim();
+    const columns = columnsByTable.get(tableName) || [];
+    const statusColumn = findColumnByCandidates(
+      columns,
+      STATUS_COLUMN_CANDIDATES
+    )?.column_name;
+    const workIdColumn = resolveWorkIdColumn(columns);
+
+    return {
+      tableName,
+      table,
+      statusColumn: statusColumn || null,
+      workIdColumn: workIdColumn || null,
+      includeInTotals: Boolean(tableName && workIdColumn),
+      skipReason: !tableName
+        ? "table_name_vacio"
+        : !workIdColumn
+          ? "sin_columna_id_obra"
+          : null,
+    };
+  });
+
+  const includedTableCandidates = tableCandidates.filter(
+    (candidate) => candidate.includeInTotals
+  );
+  const rows = await mapWithConcurrency(
+    includedTableCandidates,
+    KPI_SUMMARY_CONCURRENCY,
+    async (candidate) => {
+      const { tableName, statusColumn, workIdColumn, table } = candidate;
+      try {
+        const summary = await getTableKpiSummary(
+          tableName,
+          statusColumn || null,
+          workIdColumn || null
+        );
+        return {
+          ...summary,
+          dg: table?.dg || null,
+          geometry_type: table?.geometry_type || null,
+        };
+      } catch (error) {
+        logBackendError(
+          `[GIS API] No se pudo obtener KPI para "${GIS_SCHEMA}"."${tableName}"`,
+          error?.message || error
+        );
+        return {
+          table_name: tableName,
+          status_column: statusColumn || null,
+          work_id_column: workIdColumn || null,
+          dg: table?.dg || null,
+          geometry_type: table?.geometry_type || null,
+          error: String(error?.message || error || "Error desconocido"),
+          total: 0,
+          ...buildEmptyStatusCounters(),
+        };
+      }
+    }
+  );
+
+  const fallbackSummedTotals = rows.reduce(
+    (accumulator, row) => {
+      if (!row) return accumulator;
+      accumulator.total_obras += Number(row.total || 0);
+      accumulator.entregadas += Number(row.entregado || 0);
+      accumulator.terminadas += Number(row.terminado || 0);
+      accumulator.en_proceso += Number(row.proceso || 0);
+      accumulator.sin_iniciar += Number(row.sin_iniciar || 0);
+      accumulator.otro += Number(row.otro || 0);
+      return accumulator;
+    },
+    {
+      total_obras: 0,
+      entregadas: 0,
+      terminadas: 0,
+      en_proceso: 0,
+      sin_iniciar: 0,
+      otro: 0,
+    }
+  );
+  const globalDistinctTotals = await getGlobalDistinctKpiTotals(
+    targetTables,
+    columnsByTable
+  );
+  const totals = globalDistinctTotals || fallbackSummedTotals;
+  const skippedTables = tableCandidates
+    .filter((candidate) => !candidate.includeInTotals)
+    .map((candidate) => ({
+      table_name: candidate.tableName,
+      dg: candidate.table?.dg || null,
+      geometry_type: candidate.table?.geometry_type || null,
+      status_column: candidate.statusColumn,
+      work_id_column: candidate.workIdColumn,
+      reason: candidate.skipReason || "excluida",
+    }));
+
+  const summaryPayload = {
+    generated_at: new Date().toISOString(),
+    cache_ttl_ms: KPI_CACHE_TTL_MS,
+    totals,
+    by_table: rows.filter(Boolean),
+    audit: {
+      target_tables: targetTables.length,
+      included_tables: includedTableCandidates.length,
+      skipped_tables: skippedTables,
+      totals_strategy: globalDistinctTotals ? "global_distinct" : "table_sum_fallback",
+      totals_from_table_sum: fallbackSummedTotals,
+      totals_from_global_distinct: globalDistinctTotals,
+    },
+  };
+
+  kpiSummaryCache = summaryPayload;
+  kpiSummaryCacheTime = Date.now();
+  return summaryPayload;
+}
+
 // ── Consultas a information_schema ───────────────────────────────────────────
 
 // Devuelve todas las tablas del schema sig_sobse.
@@ -303,7 +1128,7 @@ async function getSchemaTables() {
         AND table_type = 'BASE TABLE'
       ORDER BY table_name ASC
     `,
-    [GIS_SCHEMA]
+    [GIS_SCHEMA],
   );
 
   return result.rows;
@@ -320,7 +1145,7 @@ async function getTableColumns(tableName) {
         AND table_name = $2
       ORDER BY ordinal_position ASC
     `,
-    [GIS_SCHEMA, tableName]
+    [GIS_SCHEMA, tableName],
   );
 
   return result.rows;
@@ -334,7 +1159,22 @@ async function getSchemaColumns() {
       WHERE table_schema = $1
       ORDER BY table_name ASC, ordinal_position ASC
     `,
-    [GIS_SCHEMA]
+    [GIS_SCHEMA],
+  );
+
+  return result.rows;
+}
+
+async function getSchemaGeometryTypes() {
+  const result = await query(
+    `
+      SELECT
+        f_table_name AS table_name,
+        type AS geometry_type
+      FROM public.geometry_columns
+      WHERE f_table_schema = $1
+    `,
+    [GIS_SCHEMA],
   );
 
   return result.rows;
@@ -353,7 +1193,7 @@ async function mapWithConcurrency(items, workerLimit, iteratee) {
 
         results[next.index] = await iteratee(next.item, next.index);
       }
-    })
+    }),
   );
 
   return results;
@@ -370,12 +1210,15 @@ async function getLayerCatalog() {
   const validCatalogCache = getValidCatalogCache();
   if (validCatalogCache) return validCatalogCache;
 
-  logBackend(`[GIS API] Consultando schema "${GIS_SCHEMA}" para catálogo de tablas...`);
+  logBackend(
+    `[GIS API] Consultando schema "${GIS_SCHEMA}" para catálogo de tablas...`,
+  );
 
   const tables = await getSchemaTables();
   const schemaColumns = await getSchemaColumns();
+  const schemaGeometryTypes = await getSchemaGeometryTypes();
   const columnsByTable = schemaColumns.reduce((accumulator, column) => {
-    const tableName = String(column?.table_name || '').trim();
+    const tableName = String(column?.table_name || "").trim();
     if (!tableName) return accumulator;
 
     const currentColumns = accumulator.get(tableName) || [];
@@ -383,15 +1226,22 @@ async function getLayerCatalog() {
     accumulator.set(tableName, currentColumns);
     return accumulator;
   }, new Map());
+  const geometryTypeByTable = schemaGeometryTypes.reduce((accumulator, row) => {
+    const tableName = String(row?.table_name || "").trim();
+    if (!tableName) return accumulator;
+    const geometryType = String(row?.geometry_type || "").trim() || null;
+    accumulator.set(tableName, geometryType);
+    return accumulator;
+  }, new Map());
 
   const columnResults = tables.map((table) => {
-    const tableName = String(table?.table_name || '').trim();
+    const tableName = String(table?.table_name || "").trim();
     return tableName ? columnsByTable.get(tableName) || [] : [];
   });
 
   const catalogSummaries = await mapWithConcurrency(
     tables.map((table, index) => {
-      const tableName = String(table?.table_name || '').trim();
+      const tableName = String(table?.table_name || "").trim();
       const columns = columnResults[index] || [];
       const geometryColumn = columns.find(isGeometryColumn) || null;
 
@@ -402,46 +1252,51 @@ async function getLayerCatalog() {
       return getLayerCatalogSummary(
         tableName,
         geometryColumn.column_name,
-        columns
+        columns,
       ).catch((error) => {
         logBackendError(
           `[GIS API] No se pudo obtener resumen del catálogo para "${GIS_SCHEMA}"."${tableName}"`,
-          error
+          error,
         );
         return null;
       });
     }),
     CATALOG_SUMMARY_CONCURRENCY,
-    (summaryTask) => summaryTask
+    (summaryTask) => summaryTask,
   );
 
   // Combina cada tabla con sus columnas y detecta si tiene geometría
-  const catalog = tables.map((table, index) => {
-    const tableName = String(table?.table_name || '').trim();
-    const columns = columnResults[index] || [];
-    const geometryColumn = columns.find(isGeometryColumn) || null;
-    const hasGeom = Boolean(geometryColumn);
-    const summary = catalogSummaries[index] || null;
+  const catalog = tables
+    .map((table, index) => {
+      const tableName = String(table?.table_name || "").trim();
+      const columns = columnResults[index] || [];
+      const geometryColumn = columns.find(isGeometryColumn) || null;
+      const hasGeom = Boolean(geometryColumn);
+      const summary = catalogSummaries[index] || null;
 
-    logBackend(
-      `[GIS API] Tabla "${GIS_SCHEMA}"."${tableName}": geom=${hasGeom ? 'sí' : 'no'}`
-    );
+      logBackend(
+        `[GIS API] Tabla "${GIS_SCHEMA}"."${tableName}": geom=${hasGeom ? "sí" : "no"}`,
+      );
 
-    return {
-      name: tableName,
-      table_name: tableName,
-      table_schema: GIS_SCHEMA,
-      has_geom: hasGeom,
-      geometry_column: hasGeom ? geometryColumn.column_name : null,
-      source_type: hasGeom ? 'postgis' : 'table',
-      estimated_count: hasGeom ? summary?.estimated_count || 0 : 0,
-      bbox: hasGeom ? summary?.bbox || null : null,
-      dg: summary?.dg || null,
-    };
-  }).filter((row) => row.name); // Elimina filas con nombre vacío
+      return {
+        name: tableName,
+        table_name: tableName,
+        table_schema: GIS_SCHEMA,
+        has_geom: hasGeom,
+        geometry_column: hasGeom ? geometryColumn.column_name : null,
+        geometry_type: hasGeom
+          ? geometryTypeByTable.get(tableName) || null
+          : null,
+        source_type: hasGeom ? "postgis" : "table",
+        estimated_count: hasGeom ? summary?.estimated_count || 0 : 0,
+        bbox: hasGeom ? summary?.bbox || null : null,
+        dg: summary?.dg || null,
+      };
+    })
+    .filter((row) => row.name); // Elimina filas con nombre vacío
 
   logBackend(
-    `[GIS API] Schema "${GIS_SCHEMA}" consultado: ${catalog.length} tablas encontradas`
+    `[GIS API] Schema "${GIS_SCHEMA}" consultado: ${catalog.length} tablas encontradas`,
   );
 
   // Guardar en caché para las próximas 5 minutos
@@ -456,7 +1311,7 @@ async function getTableMeta(tableName) {
   if (validCatalogCache) {
     return (
       validCatalogCache.find(
-        (table) => String(table?.table_name || '').trim() === tableName
+        (table) => String(table?.table_name || "").trim() === tableName,
       ) || null
     );
   }
@@ -480,7 +1335,7 @@ async function getTableMetaDirect(tableName) {
     table_schema: GIS_SCHEMA,
     has_geom: Boolean(geometryColumn),
     geometry_column: geometryColumn ? geometryColumn.column_name : null,
-    source_type: geometryColumn ? 'postgis' : 'table',
+    source_type: geometryColumn ? "postgis" : "table",
   };
 }
 
@@ -510,85 +1365,108 @@ function getSimplifyTolerance(tableName) {
 async function getPostgisLayerGeoJson(tableName, geometryColumn) {
   const safeSchema = quoteIdentifier(GIS_SCHEMA);
   const safeTable = quoteIdentifier(tableName);
-  const safeGeomColumn = quoteIdentifier(geometryColumn);
+  const safeGeomColumn = geometryColumn ? quoteIdentifier(geometryColumn) : null;
   const tolerance = getSimplifyTolerance(tableName);
 
   logBackend(
-    `[GIS API] Consultando capa GeoJSON desde "${GIS_SCHEMA}"."${tableName}" (tolerance=${tolerance})`
+    `[GIS API] Consultando capa GeoJSON desde "${GIS_SCHEMA}"."${tableName}" (tolerance=${tolerance})`,
   );
 
   const result = await query(
     `
-      SELECT jsonb_build_object(
-        'type', 'FeatureCollection',
-        'features', COALESCE(
-          jsonb_agg(
-            jsonb_build_object(
-              'type', 'Feature',
-              'geometry', ST_AsGeoJSON(
-                ST_Simplify(${safeGeomColumn}, $2, true)
-              )::jsonb,
-              'properties', to_jsonb(row_data) - $1
-            )
-          ),
-          '[]'::jsonb
-        )
-      ) AS geojson
+      SELECT row_data.*,
+        ST_AsGeoJSON(
+          ST_Simplify(${safeGeomColumn}, $2, true)
+        ) AS geometry_geojson
       FROM ${safeSchema}.${safeTable} AS row_data
       WHERE ${safeGeomColumn} IS NOT NULL
         AND ST_IsValid(${safeGeomColumn})
     `,
-    [geometryColumn, tolerance]
+    [geometryColumn, tolerance],
   );
 
-  // Si la tabla está vacía, devuelve un FeatureCollection vacío en lugar de null
-  return result.rows[0]?.geojson || {
-    type: 'FeatureCollection',
-    features: [],
-  };
+  return buildGeoJsonFeatureCollection(result.rows, geometryColumn);
+}
+
+async function getTableRowsGeoJson(tableName) {
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const safeTable = quoteIdentifier(tableName);
+
+  logBackend(`[GIS API] Consultando tabla sin columna geom como GeoJSON: "${GIS_SCHEMA}"."${tableName}"`);
+
+  const result = await query(`SELECT * FROM ${safeSchema}.${safeTable}`);
+  return buildGeoJsonFeatureCollection(result.rows, null);
 }
 
 async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
-  const cachedGeoJson = getCachedLayerGeoJson(tableName);
-  if (cachedGeoJson) {
-    return { geojson: cachedGeoJson, cacheStatus: 'hit' };
+  const cachedLayer = getCachedLayerGeoJson(tableName);
+  if (cachedLayer) {
+    return {
+      geojson: cachedLayer.geojson,
+      cacheStatus: "hit",
+      etag: cachedLayer.etag || buildWeakEtag(cachedLayer.geojson),
+    };
   }
 
   const sharedRequest = layerGeoJsonInFlight.get(tableName);
   if (sharedRequest) {
-    return { geojson: await sharedRequest, cacheStatus: 'shared' };
+    const sharedPayload = await sharedRequest;
+    return {
+      geojson: sharedPayload.geojson,
+      cacheStatus: "shared",
+      etag: sharedPayload.etag,
+    };
   }
 
   const requestPromise = getPostgisLayerGeoJson(tableName, geometryColumn)
     .then((geojson) => {
+      const etag = buildWeakEtag(geojson);
       layerGeoJsonCache.set(tableName, {
         geojson,
+        etag,
         cachedAt: Date.now(),
       });
-      return geojson;
+      return { geojson, etag };
     })
     .finally(() => {
       layerGeoJsonInFlight.delete(tableName);
     });
 
   layerGeoJsonInFlight.set(tableName, requestPromise);
-  return { geojson: await requestPromise, cacheStatus: 'miss' };
+  const payload = await requestPromise;
+  return {
+    geojson: payload.geojson,
+    cacheStatus: "miss",
+    etag: payload.etag,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HANDLERS — funciones reutilizables para registrar en / y /api
 // ─────────────────────────────────────────────────────────────────────────────
 
-function handleHealth(_req, res) {
-  res.json(getServiceStatus());
+async function handleHealth(req, res) {
+  const healthPayload = {
+    ...getServiceStatus(),
+    checks: {
+      kpi_summary: await getKpiRouteHealth({ force: false }),
+    },
+    limits: {
+      request_timeout_ms: API_REQUEST_TIMEOUT_MS,
+      rate_limit_enabled: ENABLE_RATE_LIMIT,
+      rate_limit_window_ms: RATE_LIMIT_WINDOW_MS,
+      rate_limit_max_requests: RATE_LIMIT_MAX_REQUESTS,
+    },
+  };
+  sendJsonWithEtag(req, res, healthPayload, "no-store");
 }
 
 async function handleTest(_req, res) {
   try {
-    const result = await query('SELECT NOW() AS server_time');
+    const result = await query("SELECT NOW() AS server_time");
     res.json({
       ok: true,
-      message: 'Conexión PostgreSQL exitosa',
+      message: "Conexión PostgreSQL exitosa",
       rows: result.rows,
     });
   } catch (error) {
@@ -596,7 +1474,99 @@ async function handleTest(_req, res) {
   }
 }
 
-async function handleLayers(_req, res) {
+async function handleSearch(req, res) {
+  const queryParam = String(req.query.q || "").trim();
+  if (!queryParam) {
+    res
+      .status(400)
+      .json({ ok: false, error: 'Parámetro de búsqueda "q" requerido.' });
+    return;
+  }
+
+  try {
+    // Get all tables with geometry
+    const tablesResult = await query(
+      `
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = $1
+          AND table_type = 'BASE TABLE'
+      `,
+      [GIS_SCHEMA],
+    );
+
+    const searchResults = { obras: [], programas: [], capas: [] };
+    const searchTerm = `%${queryParam}%`;
+
+    for (const { table_name } of tablesResult.rows) {
+      const safeTable = quoteIdentifier(table_name);
+
+      // Search in nombre_obra, programa, direccion_general, alcaldia, colonia
+      const searchQuery = `
+        SELECT
+          ${safeTable}.*,
+          ST_AsGeoJSON(geom) AS geometry_geojson
+        FROM ${quoteIdentifier(GIS_SCHEMA)}.${safeTable}
+        WHERE
+          ("NOMBRE DEL SITIO INTERVENIDO" ILIKE $1 OR
+           "PROGRAMA" ILIKE $1 OR
+           "DIRECCION GENERAL" ILIKE $1 OR
+           "ALCALDIA" ILIKE $1 OR
+           "COLONIA" ILIKE $1 OR
+           "CALLE" ILIKE $1)
+          AND geom IS NOT NULL
+        LIMIT 50
+      `;
+
+      try {
+        const result = await query(searchQuery, [searchTerm]);
+
+        result.rows.forEach((row) => {
+          const feature = {
+            type: "Feature",
+            geometry: row.geometry_geojson
+              ? JSON.parse(row.geometry_geojson)
+              : null,
+            properties: { ...row, geometry_geojson: undefined },
+            table_name,
+          };
+
+          // Categorize results
+          if (
+            row.nombre_obra &&
+            row.nombre_obra.toLowerCase().includes(queryParam.toLowerCase())
+          ) {
+            searchResults.obras.push(feature);
+          }
+          if (
+            row.programa &&
+            row.programa.toLowerCase().includes(queryParam.toLowerCase())
+          ) {
+            searchResults.programas.push(feature);
+          }
+          // Capas would be the table names themselves, but for now we'll add all
+          if (!searchResults.capas.find((c) => c.table_name === table_name)) {
+            searchResults.capas.push({ table_name, name: table_name });
+          }
+        });
+      } catch (tableError) {
+        // Skip tables that don't have the expected columns
+        logBackend(`Skipping table ${table_name}: ${tableError.message}`);
+      }
+    }
+
+    res.json({
+      ok: true,
+      message: `Búsqueda completada para "${queryParam}"`,
+      results: searchResults,
+      total: searchResults.obras.length + searchResults.programas.length,
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+async function handleLayers(req, res) {
   try {
     const catalog = await getLayerCatalog();
     const tables = catalog.map((table) => ({
@@ -611,23 +1581,23 @@ async function handleLayers(_req, res) {
       dg: table.dg,
     }));
 
-    res.set('Cache-Control', 'public, max-age=60');
-    res.json({
+    const payload = {
       ok: true,
       message: `Tablas del schema "${GIS_SCHEMA}" consultadas correctamente`,
       tables,
       total: tables.length,
-    });
+    };
+    sendJsonWithEtag(req, res, payload, "public, max-age=60");
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   }
 }
 
 async function handleLayerTable(req, res) {
-  const tableName = String(req.params.table || '').trim();
+  const tableName = String(req.params.table || "").trim();
 
   if (!tableName) {
-    res.status(400).json({ ok: false, error: 'Nombre de tabla inválido.' });
+    res.status(400).json({ ok: false, error: "Nombre de tabla inválido." });
     return;
   }
 
@@ -642,25 +1612,146 @@ async function handleLayerTable(req, res) {
       return;
     }
 
-    if (!metadata.has_geom || !metadata.geometry_column) {
-      logBackend(
-        `[GIS API] Tabla "${GIS_SCHEMA}"."${tableName}" encontrada sin columna geom geometry`
+    let geojson = null;
+    let responseEtag = null;
+    let cacheStatus = 'miss';
+
+    if (metadata.has_geom && metadata.geometry_column) {
+      const cached = await getCachedPostgisLayerGeoJson(
+        metadata.table_name,
+        metadata.geometry_column,
       );
-      res.status(400).json({
-        ok: false,
-        error: `La tabla "${tableName}" no tiene una columna geom tipo geometry.`,
-      });
-      return;
+      geojson = cached.geojson;
+      cacheStatus = cached.cacheStatus;
+      responseEtag = cached.etag;
+    } else {
+      geojson = await getTableRowsGeoJson(metadata.table_name);
+      responseEtag = buildWeakEtag(geojson);
     }
 
-    const { geojson, cacheStatus } = await getCachedPostgisLayerGeoJson(
-      metadata.table_name,
-      metadata.geometry_column
+    if (responseEtag) {
+      res.set("ETag", responseEtag);
+      if (matchesIfNoneMatch(req.get("if-none-match"), responseEtag)) {
+        res.set("Cache-Control", "public, max-age=120");
+        res.set("X-GIS-Cache", cacheStatus);
+        res.status(304).end();
+        return;
+      }
+    }
+    res.set("Cache-Control", "public, max-age=120");
+    res.set("X-GIS-Cache", cacheStatus);
+    res.json(geojson);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+async function handleKpiSummary(req, res) {
+  try {
+    const forceParam = String(req.query?.force || "").toLowerCase();
+    const forceRefresh =
+      forceParam === "1" || forceParam === "true" || forceParam === "yes";
+    if (forceRefresh) {
+      invalidateKpiSummaryCache();
+    }
+    const summary = await getKpiSummaryCatalog();
+    const payload = {
+      ok: true,
+      message: "KPIs ejecutivos calculados correctamente.",
+      ...summary,
+    };
+    kpiRouteHealthCache = {
+      checked_at: new Date().toISOString(),
+      checked_at_epoch_ms: Date.now(),
+      ok: true,
+      source: "kpi_summary",
+      error: null,
+      total_obras: Number(summary?.totals?.total_obras || 0),
+    };
+    sendJsonWithEtag(req, res, payload, "public, max-age=60");
+  } catch (error) {
+    kpiRouteHealthCache = {
+      checked_at: new Date().toISOString(),
+      checked_at_epoch_ms: Date.now(),
+      ok: false,
+      source: "kpi_summary",
+      error: String(error?.message || error || "Error desconocido"),
+      total_obras: null,
+    };
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+async function handleKpiAudit(req, res) {
+  try {
+    const forceParam = String(req.query?.force || "").toLowerCase();
+    const forceRefresh =
+      forceParam === "1" || forceParam === "true" || forceParam === "yes";
+    if (forceRefresh) {
+      invalidateKpiSummaryCache();
+    }
+
+    const summary = await getKpiSummaryCatalog();
+    const byTable = Array.isArray(summary?.by_table) ? summary.by_table : [];
+    const totalsFromRows = byTable.reduce(
+      (accumulator, row) => {
+        accumulator.total_obras += Number(row?.total || 0);
+        accumulator.entregadas += Number(row?.entregado || 0);
+        accumulator.terminadas += Number(row?.terminado || 0);
+        accumulator.en_proceso += Number(row?.proceso || 0);
+        accumulator.sin_iniciar += Number(row?.sin_iniciar || 0);
+        accumulator.otro += Number(row?.otro || 0);
+        return accumulator;
+      },
+      {
+        total_obras: 0,
+        entregadas: 0,
+        terminadas: 0,
+        en_proceso: 0,
+        sin_iniciar: 0,
+        otro: 0,
+      }
     );
 
-    res.set('Cache-Control', 'public, max-age=120');
-    res.set('X-GIS-Cache', cacheStatus);
-    res.json(geojson);
+    const totals = summary?.totals || {};
+    const payload = {
+      ok: true,
+      message: "Auditoría KPI generada correctamente.",
+      generated_at: new Date().toISOString(),
+      summary_generated_at: summary?.generated_at || null,
+      totals: {
+        total_obras: Number(totals.total_obras || 0),
+        entregadas: Number(totals.entregadas || 0),
+        terminadas: Number(totals.terminadas || 0),
+        en_proceso: Number(totals.en_proceso || 0),
+        sin_iniciar: Number(totals.sin_iniciar || 0),
+        otro: Number(totals.otro || 0),
+      },
+      table_rollup: totalsFromRows,
+      deltas: {
+        total_obras:
+          Number(totals.total_obras || 0) - Number(totalsFromRows.total_obras || 0),
+        entregadas:
+          Number(totals.entregadas || 0) - Number(totalsFromRows.entregadas || 0),
+        terminadas:
+          Number(totals.terminadas || 0) - Number(totalsFromRows.terminadas || 0),
+        en_proceso:
+          Number(totals.en_proceso || 0) - Number(totalsFromRows.en_proceso || 0),
+        sin_iniciar:
+          Number(totals.sin_iniciar || 0) - Number(totalsFromRows.sin_iniciar || 0),
+        otro: Number(totals.otro || 0) - Number(totalsFromRows.otro || 0),
+      },
+      table_count: byTable.length,
+      table_errors: byTable
+        .filter((row) => Boolean(row?.error))
+        .map((row) => ({
+          table_name: row.table_name,
+          error: row.error,
+        })),
+      audit: summary?.audit || null,
+    };
+
+    sendJsonWithEtag(req, res, payload, "no-store");
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   }
@@ -669,11 +1760,11 @@ async function handleLayerTable(req, res) {
 function handleCacheInvalidate(req, res) {
   if (IS_PRODUCTION && !CACHE_INVALIDATE_TOKEN) {
     logBackendError(
-      '[GIS API] Intento de invalidar caché bloqueado: CACHE_INVALIDATE_TOKEN no configurado en producción'
+      "[GIS API] Intento de invalidar caché bloqueado: CACHE_INVALIDATE_TOKEN no configurado en producción",
     );
     res.status(503).json({
       ok: false,
-      error: 'CACHE_INVALIDATE_TOKEN no está configurado en producción.',
+      error: "CACHE_INVALIDATE_TOKEN no está configurado en producción.",
     });
     return;
   }
@@ -681,16 +1772,60 @@ function handleCacheInvalidate(req, res) {
   if (CACHE_INVALIDATE_TOKEN) {
     const requestToken = getInvalidateRequestToken(req);
     if (requestToken !== CACHE_INVALIDATE_TOKEN) {
-      logBackendError('[GIS API] Intento no autorizado de invalidar caché');
-      res.status(401).json({ ok: false, error: 'No autorizado para invalidar caché.' });
+      logBackendError("[GIS API] Intento no autorizado de invalidar caché");
+      res
+        .status(401)
+        .json({ ok: false, error: "No autorizado para invalidar caché." });
       return;
     }
   }
 
   invalidateCatalogCache();
   invalidateLayerGeoJsonCache();
-  logBackend('[GIS API] Caché de catálogo invalidado manualmente');
-  res.json({ ok: true, message: 'Caché de catálogo invalidado.' });
+  invalidateKpiSummaryCache();
+  logBackend("[GIS API] Caché de catálogo invalidado manualmente");
+  res.json({ ok: true, message: "Caché de catálogo invalidado." });
+}
+
+async function handlePopulationQuery(req, res) {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  const radiusKm = Math.min(10, Math.max(0.1, Number(req.query.radiusKm)));
+  const maxRenderFeatures = Math.max(
+    0,
+    Number(req.query.maxRenderFeatures || POPULATION_MAX_RENDER_FEATURES),
+  );
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radiusKm)) {
+    res.status(400).json({
+      ok: false,
+      error: "Parámetros inválidos: lat, lng y radiusKm son requeridos.",
+    });
+    return;
+  }
+
+  try {
+    const result = await populationAnalysisEngine.queryRadius({
+      lat,
+      lng,
+      radiusKm,
+      maxRenderFeatures,
+    });
+
+    res.set("Cache-Control", "no-store");
+    res.json({
+      ok: true,
+      source: result.source || "backend",
+      engine: populationAnalysisEngine.getStatus(),
+      result,
+    });
+  } catch (error) {
+    logBackendError("[GIS API] Population query error:", error?.message || error);
+    res.status(500).json({
+      ok: false,
+      error: error?.message || "Error calculando población.",
+    });
+  }
 }
 
 // ── Búsqueda global en BD ─────────────────────────────────────────────────────
@@ -808,10 +1943,10 @@ async function handleSearch(req, res) {
 // RUTAS DE LA API — registradas en / y en /api (mismo handler, sin duplicar lógica)
 // ─────────────────────────────────────────────────────────────────────────────
 
-logBackend('[GIS API] Backend activo — rutas disponibles en / y /api');
+logBackend("[GIS API] Backend activo — rutas disponibles en / y /api");
 
 // GET / → sirve frontend o estado del backend
-app.get('/', (_req, res) => {
+app.get("/", (_req, res) => {
   if (HAS_FRONTEND_BUILD) {
     res.sendFile(FRONTEND_INDEX_FILE);
     return;
@@ -820,6 +1955,7 @@ app.get('/', (_req, res) => {
 });
 
 // Rutas montadas en ambos prefijos (/ y /api)
+<<<<<<< Updated upstream
 for (const prefix of ['', '/api']) {
   app.get(`${prefix}/health`,            handleHealth);
   app.get(`${prefix}/test`,              handleTest);
@@ -832,19 +1968,57 @@ for (const prefix of ['', '/api']) {
 logBackend('[GIS API] Ruta /api/layers disponible');
 logBackend('[GIS API] Ruta /api/layer/:table disponible');
 logBackend('[GIS API] Ruta /api/search disponible');
+=======
+for (const prefix of ["", "/api"]) {
+  app.get(`${prefix}/health`, handleHealth);
+  app.get(`${prefix}/test`, handleTest);
+  app.get(`${prefix}/search`, handleSearch);
+  app.get(`${prefix}/layers`, handleLayers);
+  app.get(`${prefix}/layer/:table`, handleLayerTable);
+  app.get(`${prefix}/kpi/audit`, handleKpiAudit);
+  app.get(`${prefix}/kpi/summary`, handleKpiSummary);
+  app.get(`${prefix}/kpis/audit`, handleKpiAudit);
+  app.get(`${prefix}/kpis/summary`, handleKpiSummary);
+  app.get(`${prefix}/population/query`, handlePopulationQuery);
+  app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
+}
+
+logBackend("[GIS API] Ruta /api/layers disponible");
+logBackend("[GIS API] Ruta /api/layer/:table disponible");
+logBackend("[GIS API] Ruta /api/kpi/audit disponible");
+logBackend("[GIS API] Ruta /api/kpi/summary disponible");
+logBackend("[GIS API] Ruta /api/kpis/audit disponible");
+logBackend("[GIS API] Ruta /api/kpis/summary disponible");
+logBackend("[GIS API] Ruta /api/population/query disponible");
+
+populationAnalysisEngine
+  .ensureLoaded()
+  .then(() => {
+    logBackend(
+      "[GIS API] Motor de población precargado:",
+      populationAnalysisEngine.getStatus(),
+    );
+  })
+  .catch((error) => {
+    logBackendError(
+      "[GIS API] No se pudo precargar motor de población:",
+      error?.message || error,
+    );
+  });
+>>>>>>> Stashed changes
 
 // Si existe el build del frontend, sirve los assets estáticos ya compilados.
 if (HAS_FRONTEND_BUILD) {
   app.use(
     express.static(FRONTEND_BUILD_DIR, {
       index: false,
-      maxAge: IS_PRODUCTION ? '1d' : 0,
-    })
+      maxAge: IS_PRODUCTION ? "1d" : 0,
+    }),
   );
 
   // Fallback SPA: cualquier ruta del frontend regresa index.html.
   // Se excluyen rutas de API y archivos estáticos para no romper el backend.
-  app.get('*', (req, res, next) => {
+  app.get("*", (req, res, next) => {
     if (!shouldServeFrontendApp(req)) {
       next();
       return;
@@ -858,7 +2032,7 @@ if (HAS_FRONTEND_BUILD) {
 app.use((req, res) => {
   res.status(404).json({
     ok: false,
-    error: 'Ruta no encontrada',
+    error: "Ruta no encontrada",
   });
 });
 
@@ -866,9 +2040,9 @@ app.use((req, res) => {
 // ARRANQUE Y APAGADO DEL SERVIDOR
 // ─────────────────────────────────────────────────────────────────────────────
 
-const server = app.listen(port, '0.0.0.0', () => {
+const server = app.listen(port, "0.0.0.0", () => {
   logBackend(
-    `[GIS API] Backend iniciado en puerto ${port} (frontend integrado=${HAS_FRONTEND_BUILD ? 'sí' : 'no'})`
+    `[GIS API] Backend iniciado en puerto ${port} (frontend integrado=${HAS_FRONTEND_BUILD ? "sí" : "no"})`,
   );
 });
 
@@ -883,5 +2057,5 @@ function shutdown(signal) {
   });
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));   // Ctrl+C en terminal
-process.on('SIGTERM', () => shutdown('SIGTERM')); // kill desde sistema operativo
+process.on("SIGINT", () => shutdown("SIGINT")); // Ctrl+C en terminal
+process.on("SIGTERM", () => shutdown("SIGTERM")); // kill desde sistema operativo
