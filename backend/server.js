@@ -1166,18 +1166,49 @@ async function getSchemaColumns() {
 }
 
 async function getSchemaGeometryTypes() {
-  const result = await query(
-    `
-      SELECT
-        f_table_name AS table_name,
-        type AS geometry_type
-      FROM public.geometry_columns
-      WHERE f_table_schema = $1
-    `,
-    [GIS_SCHEMA],
-  );
+  try {
+    const result = await query(
+      `
+        SELECT
+          f_table_name AS table_name,
+          type AS geometry_type
+        FROM public.geometry_columns
+        WHERE f_table_schema = $1
+      `,
+      [GIS_SCHEMA],
+    );
 
-  return result.rows;
+    return result.rows;
+  } catch (error) {
+    // Algunas instalaciones exponen PostGIS sin la vista pública
+    // `public.geometry_columns`. En ese caso degradamos a information_schema
+    // para no romper KPIs/catálogo.
+    if (String(error?.code || "") !== "42P01") {
+      throw error;
+    }
+
+    const fallback = await query(
+      `
+        SELECT
+          table_name,
+          NULL::text AS geometry_type
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND (
+            udt_name = 'geometry'
+            OR udt_name = 'geography'
+            OR (
+              data_type = 'USER-DEFINED'
+              AND lower(column_name) = 'geom'
+            )
+          )
+        ORDER BY table_name ASC
+      `,
+      [GIS_SCHEMA],
+    );
+
+    return fallback.rows;
+  }
 }
 
 async function mapWithConcurrency(items, workerLimit, iteratee) {
