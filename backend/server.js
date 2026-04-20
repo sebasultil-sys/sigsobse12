@@ -91,20 +91,56 @@ const allowedOrigins = CORS_ALLOWED_ORIGINS.split(",")
   .map(normalizeOrigin)
   .filter(Boolean);
 
-const corsOptions = allowedOrigins.length
-  ? {
-      origin: (origin, callback) => {
-        // Permitir requests sin Origin (curl, health checks internos, server-to-server)
-        if (!origin) {
-          callback(null, true);
-          return;
-        }
+const DEFAULT_CORS_ALLOWED_ORIGIN_PATTERNS = [
+  /^https?:\/\/localhost(?::\d+)?$/i,
+  /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i,
+  /^https?:\/\/[^/]+\.hstgr\.io$/i,
+];
 
-        const normalizedOrigin = normalizeOrigin(origin);
-        callback(null, allowedOrigins.includes(normalizedOrigin));
-      },
-    }
-  : { origin: "*" };
+function isOriginAllowed(origin) {
+  if (!origin) return true;
+
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (!normalizedOrigin) return true;
+  if (!allowedOrigins.length) return true;
+  if (allowedOrigins.includes(normalizedOrigin)) return true;
+  return DEFAULT_CORS_ALLOWED_ORIGIN_PATTERNS.some((pattern) =>
+    pattern.test(normalizedOrigin),
+  );
+}
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    callback(null, isOriginAllowed(origin));
+  },
+};
+
+const MOVILIDAD_LAYERS = ["trolebus", "cablebus", "tren_ligero"];
+
+function normalizeMobilityKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function isMobilityTableName(value) {
+  const normalized = normalizeMobilityKey(value);
+  if (!normalized) return false;
+  const compact = normalized.replace(/_/g, "");
+  return MOVILIDAD_LAYERS.some((token) => {
+    const compactToken = token.replace(/_/g, "");
+    return normalized.includes(token) || compact.includes(compactToken);
+  });
+}
+
+function buildKpiGeometryFilterSql(tableName, safeGeometryColumn) {
+  if (!safeGeometryColumn) return "TRUE";
+  if (!isMobilityTableName(tableName)) return "TRUE";
+  return `COALESCE(UPPER(GeometryType(${safeGeometryColumn})) NOT IN ('POINT', 'MULTIPOINT'), TRUE)`;
+}
 
 // ── Middlewares globales ──────────────────────────────────────────────────────
 
@@ -365,7 +401,7 @@ function buildGeoJsonFeatureFromRow(row, geometryColumn) {
   if (!geometry && properties.X != null && properties.Y != null) {
     const x = Number(properties.X);
     const y = Number(properties.Y);
-    if (!Number.isNaN(x) && !Number.isNaN(y)) {
+    if (!Number.isNaN(x) && !Number.isNaN(y) && isValidLngLatPair([x, y])) {
       geometry = {
         type: 'Point',
         coordinates: [x, y],
@@ -704,6 +740,20 @@ const KPI_CANONICAL_KEY_COLUMNS = String(
   .split(",")
   .map((columnName) => String(columnName || "").trim())
   .filter(Boolean);
+const KPI_CANONICAL_MIN_KEY_COVERAGE = Math.max(
+  0,
+  Math.min(
+    1,
+    Number(process.env.GIS_KPI_CANONICAL_MIN_KEY_COVERAGE || 0.85),
+  ),
+);
+const KPI_CANONICAL_MIN_DISTINCT_RATIO = Math.max(
+  0,
+  Math.min(
+    1,
+    Number(process.env.GIS_KPI_CANONICAL_MIN_DISTINCT_RATIO || 0.85),
+  ),
+);
 
 function findColumnByCandidates(columns, candidates) {
   const candidateRank = new Map(
@@ -848,7 +898,7 @@ async function getTableEstimatedBbox(tableName, geometryColumn) {
         ST_XMax(extent_box) AS east,
         ST_YMax(extent_box) AS north
       FROM (
-        SELECT ST_EstimatedExtent($1, $2, $3) AS extent_box
+        SELECT ST_EstimatedExtent(($1)::text, ($2)::text, ($3)::text) AS extent_box
       ) AS ext
       WHERE extent_box IS NOT NULL
     `,
@@ -905,13 +955,25 @@ async function getLayerCatalogSummary(tableName, geometryColumn, columns) {
   };
 }
 
-async function getTableKpiSummary(tableName, statusColumn, workIdColumn) {
+async function getTableKpiSummary(
+  tableName,
+  statusColumn,
+  workIdColumn,
+  geometryColumn = null,
+) {
   const safeSchema = quoteIdentifier(GIS_SCHEMA);
   const safeTable = quoteIdentifier(tableName);
   const safeWorkIdColumn = workIdColumn ? quoteIdentifier(workIdColumn) : null;
+  const safeGeometryColumn = geometryColumn
+    ? quoteIdentifier(geometryColumn)
+    : null;
   const normalizedWorkIdSql = safeWorkIdColumn
     ? buildNormalizedWorkIdSql(safeWorkIdColumn)
     : "NULL";
+  const geometryFilterSql = buildKpiGeometryFilterSql(
+    tableName,
+    safeGeometryColumn,
+  );
 
   if (!statusColumn) {
     const result = safeWorkIdColumn
@@ -921,17 +983,19 @@ async function getTableKpiSummary(tableName, statusColumn, workIdColumn) {
               SELECT
                 ${normalizedWorkIdSql} AS work_id
               FROM ${safeSchema}.${safeTable}
+              WHERE ${geometryFilterSql}
             )
             SELECT
               COUNT(DISTINCT work_id)::bigint AS total
             FROM base
             WHERE work_id IS NOT NULL
-          `
-        )
+        `
+      )
       : await query(
           `
             SELECT COUNT(*)::bigint AS total
             FROM ${safeSchema}.${safeTable}
+            WHERE ${geometryFilterSql}
           `
         );
 
@@ -954,6 +1018,7 @@ async function getTableKpiSummary(tableName, statusColumn, workIdColumn) {
               ${statusCaseSql} AS status_key,
               ${normalizedWorkIdSql} AS work_id
             FROM ${safeSchema}.${safeTable}
+            WHERE ${geometryFilterSql}
           )
           SELECT
             COUNT(DISTINCT work_id) FILTER (WHERE work_id IS NOT NULL)::bigint AS total,
@@ -970,6 +1035,7 @@ async function getTableKpiSummary(tableName, statusColumn, workIdColumn) {
             SELECT
               ${statusCaseSql} AS status_key
             FROM ${safeSchema}.${safeTable}
+            WHERE ${geometryFilterSql}
           )
           SELECT
             COUNT(*)::bigint AS total,
@@ -1021,7 +1087,14 @@ async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
 
     const safeTable = quoteIdentifier(tableName);
     const safeWorkIdColumn = quoteIdentifier(workIdColumn);
+    const safeGeometryColumn = table?.geometry_column
+      ? quoteIdentifier(table.geometry_column)
+      : null;
     const normalizedWorkIdSql = buildNormalizedWorkIdSql(safeWorkIdColumn);
+    const geometryFilterSql = buildKpiGeometryFilterSql(
+      tableName,
+      safeGeometryColumn,
+    );
     const statusCaseSql = statusColumn
       ? buildStatusKeyCaseSql(quoteIdentifier(statusColumn))
       : "NULL";
@@ -1033,6 +1106,7 @@ async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
       FROM ${safeSchema}.${safeTable}
       WHERE ${safeWorkIdColumn} IS NOT NULL
         AND BTRIM(${safeWorkIdColumn}::text) <> ''
+        AND ${geometryFilterSql}
     `);
   });
 
@@ -1128,26 +1202,85 @@ async function getCanonicalKpiSummary(columnsByTable) {
       FROM normalized
       WHERE work_key IS NOT NULL
       GROUP BY work_key
+    ),
+    totals_rows AS (
+      SELECT
+        COUNT(*)::bigint AS total_obras,
+        COUNT(*) FILTER (WHERE status_key = 'entregado')::bigint AS entregadas,
+        COUNT(*) FILTER (WHERE status_key = 'terminado')::bigint AS terminadas,
+        COUNT(*) FILTER (WHERE status_key = 'proceso')::bigint AS en_proceso,
+        COUNT(*) FILTER (WHERE status_key = 'sin_iniciar')::bigint AS sin_iniciar,
+        COUNT(*) FILTER (WHERE status_key IS NULL)::bigint AS otro
+      FROM normalized
+    ),
+    totals_distinct AS (
+      SELECT
+        COUNT(*)::bigint AS total_obras,
+        COUNT(*) FILTER (WHERE status_rank = 4)::bigint AS entregadas,
+        COUNT(*) FILTER (WHERE status_rank = 3)::bigint AS terminadas,
+        COUNT(*) FILTER (WHERE status_rank = 2)::bigint AS en_proceso,
+        COUNT(*) FILTER (WHERE status_rank = 1)::bigint AS sin_iniciar,
+        COUNT(*) FILTER (WHERE status_rank = 0)::bigint AS otro
+      FROM ranked
+    ),
+    key_stats AS (
+      SELECT
+        COUNT(*)::bigint AS total_rows,
+        COUNT(*) FILTER (WHERE work_key IS NOT NULL)::bigint AS rows_with_key
+      FROM normalized
     )
     SELECT
-      COUNT(*)::bigint AS total_obras,
-      COUNT(*) FILTER (WHERE status_rank = 4)::bigint AS entregadas,
-      COUNT(*) FILTER (WHERE status_rank = 3)::bigint AS terminadas,
-      COUNT(*) FILTER (WHERE status_rank = 2)::bigint AS en_proceso,
-      COUNT(*) FILTER (WHERE status_rank = 1)::bigint AS sin_iniciar,
-      COUNT(*) FILTER (WHERE status_rank = 0)::bigint AS otro
-    FROM ranked
+      tr.total_obras AS rows_total_obras,
+      tr.entregadas AS rows_entregadas,
+      tr.terminadas AS rows_terminadas,
+      tr.en_proceso AS rows_en_proceso,
+      tr.sin_iniciar AS rows_sin_iniciar,
+      tr.otro AS rows_otro,
+      td.total_obras AS distinct_total_obras,
+      td.entregadas AS distinct_entregadas,
+      td.terminadas AS distinct_terminadas,
+      td.en_proceso AS distinct_en_proceso,
+      td.sin_iniciar AS distinct_sin_iniciar,
+      td.otro AS distinct_otro,
+      ks.total_rows AS total_rows,
+      ks.rows_with_key AS rows_with_key
+    FROM totals_rows tr
+    CROSS JOIN totals_distinct td
+    CROSS JOIN key_stats ks
   `);
 
   const row = result.rows[0] || {};
-  const totals = {
-    total_obras: Number(row.total_obras || 0),
-    entregadas: Number(row.entregadas || 0),
-    terminadas: Number(row.terminadas || 0),
-    en_proceso: Number(row.en_proceso || 0),
-    sin_iniciar: Number(row.sin_iniciar || 0),
-    otro: Number(row.otro || 0),
+  const rowTotals = {
+    total_obras: Number(row.rows_total_obras || 0),
+    entregadas: Number(row.rows_entregadas || 0),
+    terminadas: Number(row.rows_terminadas || 0),
+    en_proceso: Number(row.rows_en_proceso || 0),
+    sin_iniciar: Number(row.rows_sin_iniciar || 0),
+    otro: Number(row.rows_otro || 0),
   };
+  const distinctTotals = {
+    total_obras: Number(row.distinct_total_obras || 0),
+    entregadas: Number(row.distinct_entregadas || 0),
+    terminadas: Number(row.distinct_terminadas || 0),
+    en_proceso: Number(row.distinct_en_proceso || 0),
+    sin_iniciar: Number(row.distinct_sin_iniciar || 0),
+    otro: Number(row.distinct_otro || 0),
+  };
+  const totalRows = Number(row.total_rows || rowTotals.total_obras || 0);
+  const rowsWithKey = Number(row.rows_with_key || 0);
+  const keyCoverage =
+    totalRows > 0 ? Number((rowsWithKey / totalRows).toFixed(4)) : 0;
+  const distinctToRowsRatio =
+    totalRows > 0
+      ? Number((distinctTotals.total_obras / totalRows).toFixed(4))
+      : 1;
+  const useDistinctTotals =
+    keyCoverage >= KPI_CANONICAL_MIN_KEY_COVERAGE &&
+    distinctToRowsRatio >= KPI_CANONICAL_MIN_DISTINCT_RATIO;
+  const totals = useDistinctTotals ? distinctTotals : rowTotals;
+  const totalsStrategy = useDistinctTotals
+    ? "canonical_distinct_composite_key"
+    : "canonical_table_row_sum_fallback";
 
   return {
     generated_at: new Date().toISOString(),
@@ -1174,11 +1307,15 @@ async function getCanonicalKpiSummary(columnsByTable) {
       target_tables: 1,
       included_tables: 1,
       included_tables_with_work_id: 1,
-      work_id_coverage_ratio: 1,
+      work_id_coverage_ratio: keyCoverage,
+      canonical_key_coverage: keyCoverage,
+      canonical_distinct_to_rows_ratio: distinctToRowsRatio,
+      canonical_min_key_coverage: KPI_CANONICAL_MIN_KEY_COVERAGE,
+      canonical_min_distinct_ratio: KPI_CANONICAL_MIN_DISTINCT_RATIO,
       skipped_tables: [],
-      totals_strategy: "canonical_distinct_composite_key",
-      totals_from_table_sum: totals,
-      totals_from_global_distinct: totals,
+      totals_strategy: totalsStrategy,
+      totals_from_table_sum: rowTotals,
+      totals_from_global_distinct: distinctTotals,
     },
   };
 }
@@ -1216,9 +1353,14 @@ async function getKpiSummaryCatalog() {
     (table) =>
       table?.has_geom &&
       isOperationalDg(table?.dg) &&
-      // Si geometry_type no está disponible (fallback sin geometry_columns),
-      // no descartamos la tabla; solo exigimos POINT cuando el tipo viene explícito.
-      (!table?.geometry_type || isPointGeometryType(table?.geometry_type))
+      // Regla general: capas puntuales.
+      // Excepción: movilidad (trolebus/cablebus/tren_ligero) puede ser línea y
+      // debe incluirse para KPI ejecutivo.
+      (
+        !table?.geometry_type ||
+        isPointGeometryType(table?.geometry_type) ||
+        isMobilityTableName(table?.table_name || table?.name)
+      )
   );
 
   const tableCandidates = targetTables.map((table) => {
@@ -1258,7 +1400,8 @@ async function getKpiSummaryCatalog() {
         const summary = await getTableKpiSummary(
           tableName,
           statusColumn || null,
-          workIdColumn || null
+          workIdColumn || null,
+          table?.geometry_column || null,
         );
         return {
           ...summary,
