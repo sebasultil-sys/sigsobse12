@@ -27,8 +27,16 @@ import cdmxBoundaryData from '../data/cdmxBoundary.json';
 import {
   clearLayerGeoJsonCache,
   fetchLayerGeoJSON,
+  fetchMovilidadLayerGeoJSON,
   fetchLayerTables,
 } from '../services/gisApi';
+import {
+  isMovilidadLayer,
+  isPointGeometryType,
+  resolveMovilidadLayerId,
+  resolveFeatureVisualType,
+  shouldCountFeature,
+} from '../features/map/movilidadLayerUtils';
 
 // Contexto React — null es el valor default (se reemplaza por el Provider)
 const GISWorkspaceContext = React.createContext(null);
@@ -55,7 +63,11 @@ const DATABASE_SYNC_INTERVAL_MS = Math.max(
 );
 const DATABASE_LAYER_LOAD_CONCURRENCY = Math.max(
   2,
-  Number(process.env.REACT_APP_GIS_LOAD_CONCURRENCY || 14)
+  Number(process.env.REACT_APP_GIS_LOAD_CONCURRENCY || 8)
+);
+const DATABASE_LOAD_ERROR_RETRY_COOLDOWN_MS = Math.max(
+  5000,
+  Number(process.env.REACT_APP_GIS_ERROR_RETRY_COOLDOWN_MS || 30000)
 );
 const ENABLE_GIS_DEBUG_LOGS =
   String(process.env.REACT_APP_GIS_DEBUG_LOGS || '').toLowerCase() === 'true';
@@ -95,20 +107,36 @@ function writeSavedVisibility(layers) {
 function isCartographyBaseLayer(layer) {
   if (!layer) return false;
   if (layer.referenceLayer) return true;
-  const raw = String(layer.dg || '').trim();
-  if (!raw) return true;
-  const normalized = raw
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toUpperCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (normalized === BASE_CARTOGRAPHY_GROUP_KEY) return true;
-  return normalized.includes('CARTOGRAFIA BASE');
+  const candidates = [
+    layer.dg,
+    layer.name,
+    layer.table_name,
+    layer.databaseTable,
+    layer.databaseDisplayName,
+    layer.databaseMetadata?.table_name,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+  if (!candidates.length) return false;
+
+  const normalizedCandidates = candidates.map((value) =>
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+
+  if (normalizedCandidates.some((value) => value === BASE_CARTOGRAPHY_GROUP_KEY)) {
+    return true;
+  }
+  return normalizedCandidates.some((value) => value.includes('CARTOGRAFIA BASE'));
 }
 
 function isPointLikeGeometryType(geometryType) {
-  return geometryType === 'Point' || geometryType === 'MultiPoint';
+  return isPointGeometryType(geometryType);
 }
 
 const FEATURE_WORK_ID_KEYS = [
@@ -365,11 +393,14 @@ function reorderLayers(layers, draggedId, targetId) {
 //   health         → 'risk' si hay elementos en riesgo, 'active' si no
 function computeLayerMetrics(layer) {
   const features = layer?.data?.features || [];
-  const totalElements = features.length;
-  const progressValues = features
+  const countableFeatures = features.filter((feature) =>
+    shouldCountFeature(feature, layer)
+  );
+  const totalElements = countableFeatures.length;
+  const progressValues = countableFeatures
     .map((feature) => Number(feature?.properties?.AVANCE))
     .filter((value) => !Number.isNaN(value));
-  const riskCount = features.filter(
+  const riskCount = countableFeatures.filter(
     (feature) => feature?.properties?.RIESGO === true
   ).length;
   const averageProgress = progressValues.length
@@ -634,14 +665,28 @@ function ensureFeatureFormat(row) {
 // Alias para compatibilidad con código existente
 const createFeatureFromRow = ensureFeatureFormat;
 
+function enrichFeatureVisualType(feature, movilidadLayer = false) {
+  if (!feature || typeof feature !== 'object') return feature;
+  if (!movilidadLayer) return feature;
+  return {
+    ...feature,
+    properties: {
+      ...(feature.properties || {}),
+      __tipo_visual: resolveFeatureVisualType(feature),
+    },
+  };
+}
+
 function normalizeLayerGeoJsonResponse(payload, tableName) {
   if (!payload) return null;
+  const movilidadLayer = isMovilidadLayer(tableName);
 
   // FeatureCollection del backend: sanitizar properties de cada feature
   if (payload.type === 'FeatureCollection' && Array.isArray(payload.features)) {
     const features = payload.features
       .map(ensureFeatureFormat)
       .filter((feature) => hasRenderableWgs84Geometry(feature?.geometry))
+      .map((feature) => enrichFeatureVisualType(feature, movilidadLayer))
       .filter(Boolean);
 
     if (ENABLE_GIS_DEBUG_LOGS) {
@@ -654,7 +699,10 @@ function normalizeLayerGeoJsonResponse(payload, tableName) {
   if (Array.isArray(payload)) {
     return {
       type: 'FeatureCollection',
-      features: payload.map(ensureFeatureFormat).filter(Boolean),
+      features: payload
+        .map(ensureFeatureFormat)
+        .filter(Boolean)
+        .map((feature) => enrichFeatureVisualType(feature, movilidadLayer)),
     };
   }
 
@@ -672,6 +720,7 @@ function normalizeLayerGeoJsonResponse(payload, tableName) {
       features: rows
         .map(ensureFeatureFormat)
         .filter((feature) => hasRenderableWgs84Geometry(feature?.geometry))
+        .map((feature) => enrichFeatureVisualType(feature, movilidadLayer))
         .filter(Boolean),
     };
   }
@@ -679,7 +728,7 @@ function normalizeLayerGeoJsonResponse(payload, tableName) {
   return null;
 }
 
-function getDGFromFeature(feature) {
+function getDGFromFeature(feature, fallbackDG = null) {
   const props = feature?.properties || {};
 
   const normalizeKey = (key) =>
@@ -703,10 +752,14 @@ function getDGFromFeature(feature) {
     '';
 
   if (!rawDG) {
+    const fallback = normalizeDGCode(fallbackDG);
+    if (fallback) {
+      return [fallback];
+    }
     if (ENABLE_GIS_DEBUG_LOGS) {
       console.warn('⚠️ No se encontró DG en feature:', props);
     }
-    return [];
+    return ['DG NO CLASIFICADA'];
   }
 
   const dgs = String(rawDG)
@@ -721,7 +774,7 @@ function getDGFromFeature(feature) {
   return dgs;
 }
 
-function groupFeaturesByDG(features) {
+function groupFeaturesByDG(features, fallbackDG = null) {
   if (ENABLE_GIS_DEBUG_LOGS) {
     console.log('🧪 SAMPLE FEATURE PROPERTIES:', features?.[0]?.properties);
   }
@@ -729,7 +782,7 @@ function groupFeaturesByDG(features) {
   const grouped = {};
 
   (features || []).forEach((feature) => {
-    const dgs = getDGFromFeature(feature);
+    const dgs = getDGFromFeature(feature, fallbackDG);
     if (!dgs.length) return;
 
     dgs.forEach((dg) => {
@@ -911,10 +964,142 @@ function boundsIntersect(leftBounds, rightBounds) {
   );
 }
 
-function shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds) {
+function getBoundsCenter(bounds) {
+  if (!bounds) return null;
+  const west = Number(bounds.west);
+  const south = Number(bounds.south);
+  const east = Number(bounds.east);
+  const north = Number(bounds.north);
+  if ([west, south, east, north].some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+  return {
+    lng: (west + east) / 2,
+    lat: (south + north) / 2,
+  };
+}
+
+function computeLayerViewportPriority(
+  layer,
+  mapViewportBounds,
+  selectedLayerId,
+  focusedLayerId
+) {
+  if (!layer?.databaseLayer) return 0;
+
+  let score = 0;
+  if (layer.id === selectedLayerId) score += 420;
+  if (layer.id === focusedLayerId) score += 260;
+  if (layer.loadRequested) score += 120;
+
+  if (!mapViewportBounds || !layer.catalogBbox) {
+    score += 90;
+  } else {
+    const strictIntersect = boundsIntersect(layer.catalogBbox, mapViewportBounds);
+    const nearIntersect = boundsIntersect(
+      expandBounds(layer.catalogBbox, 0.01),
+      expandBounds(mapViewportBounds, 0.015)
+    );
+
+    if (strictIntersect) score += 200;
+    else if (nearIntersect) score += 100;
+
+    const layerCenter = getBoundsCenter(layer.catalogBbox);
+    const viewportCenter = getBoundsCenter(mapViewportBounds);
+    if (layerCenter && viewportCenter) {
+      const deltaLng = layerCenter.lng - viewportCenter.lng;
+      const deltaLat = layerCenter.lat - viewportCenter.lat;
+      const distancePenalty = Math.min(
+        75,
+        Math.sqrt(deltaLng * deltaLng + deltaLat * deltaLat) * 120
+      );
+      score -= distancePenalty;
+    }
+  }
+
+  const estimatedCount = Number(layer.estimatedFeatureCount || 0);
+  if (Number.isFinite(estimatedCount) && estimatedCount > 0) {
+    score += Math.max(0, 40 - Math.log10(estimatedCount + 1) * 10);
+  }
+
+  return score;
+}
+
+function sortLayersForViewportLoad(
+  layers,
+  mapViewportBounds,
+  selectedLayerId,
+  focusedLayerId
+) {
+  return [...layers].sort((left, right) => {
+    const leftScore = computeLayerViewportPriority(
+      left,
+      mapViewportBounds,
+      selectedLayerId,
+      focusedLayerId
+    );
+    const rightScore = computeLayerViewportPriority(
+      right,
+      mapViewportBounds,
+      selectedLayerId,
+      focusedLayerId
+    );
+
+    if (rightScore !== leftScore) return rightScore - leftScore;
+
+    const leftCount = Number(left?.estimatedFeatureCount || 0);
+    const rightCount = Number(right?.estimatedFeatureCount || 0);
+    if (leftCount !== rightCount) return leftCount - rightCount;
+
+    return String(left?.name || '').localeCompare(String(right?.name || ''), 'es');
+  });
+}
+
+function resolveDynamicLayerLoadConcurrency(queueLength) {
+  let concurrency = DATABASE_LAYER_LOAD_CONCURRENCY;
+  if (typeof navigator !== 'undefined') {
+    const connection =
+      navigator.connection ||
+      navigator.mozConnection ||
+      navigator.webkitConnection;
+    const saveData = Boolean(connection?.saveData);
+    const effectiveType = String(connection?.effectiveType || '').toLowerCase();
+    const downlink = Number(connection?.downlink || 0);
+
+    if (saveData) concurrency = Math.min(concurrency, 2);
+    if (effectiveType.includes('2g')) concurrency = Math.min(concurrency, 2);
+    else if (effectiveType.includes('3g')) concurrency = Math.min(concurrency, 3);
+    if (Number.isFinite(downlink) && downlink > 0 && downlink < 1.5) {
+      concurrency = Math.min(concurrency, 2);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    const viewportWidth = Number(window.innerWidth || 0);
+    const coarsePointer =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(pointer: coarse)').matches;
+    if ((Number.isFinite(viewportWidth) && viewportWidth > 0 && viewportWidth <= 900) || coarsePointer) {
+      concurrency = Math.min(concurrency, 4);
+    }
+  }
+
+  return Math.max(1, Math.min(concurrency, queueLength));
+}
+
+function shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds, nowMs = Date.now()) {
   if (!layer?.databaseLayer || !layer.visible) return false;
   if (layer.loadStatus === 'loading' || layer.loadStatus === 'loaded') return false;
-  if (layer.loadStatus === 'error') return false;
+  if (layer.loadStatus === 'error') {
+    const loadErrorAt = Number(layer?.loadErrorAt || 0);
+    if (loadErrorAt && nowMs - loadErrorAt < DATABASE_LOAD_ERROR_RETRY_COOLDOWN_MS) {
+      return false;
+    }
+  }
+
+  // Si la capa fue solicitada explícitamente (encender capa / encender todas),
+  // la cargamos aunque esté fuera del viewport actual.
+  if (layer.loadRequested) return true;
 
   if (!mapViewportBounds) return !layer.catalogBbox;
   if (!layer.catalogBbox) return true;
@@ -948,7 +1133,10 @@ function buildDatabaseLayerDefinition({
       ? geoJson
       : existingLayer?.data || createEmptyFeatureCollection();
 
-  const groupedFeatures = groupFeaturesByDG(baseCollection.features);
+  const groupedFeatures = groupFeaturesByDG(
+    baseCollection.features,
+    metadata?.dg || existingLayer?.dg || null
+  );
   if (ENABLE_GIS_DEBUG_LOGS) {
     console.log('DG DISTRIBUCIÓN:', {
       table: tableName,
@@ -970,7 +1158,12 @@ function buildDatabaseLayerDefinition({
     const color = existingGroupLayer?.color || getStableColor(`${tableName}-${dg}`);
     const baseStyle = buildLayerStyle(color, geometryType);
     const displayName = formatDatabaseLayerName(name || tableName);
-    const isBaseCartography = isCartographyBaseLayer({ dg });
+    const isBaseCartography = isCartographyBaseLayer({
+      dg,
+      name: displayName,
+      table_name: tableName,
+      databaseMetadata: metadata,
+    });
 
     const layer = {
       id: dgLayerId,
@@ -1021,6 +1214,9 @@ function buildDatabaseLayerDefinition({
       estimatedFeatureCount: dgFeatures.length,
       loadStatus: hasFreshGeoJson ? 'loaded' : existingGroupLayer?.loadStatus || 'idle',
       loadError: hasFreshGeoJson ? null : existingGroupLayer?.loadError || null,
+      loadErrorAt: hasFreshGeoJson
+        ? null
+        : existingGroupLayer?.loadErrorAt || null,
       loadRequested: existingGroupLayer
         ? existingGroupLayer.loadRequested
         : true,
@@ -1058,7 +1254,12 @@ function buildDatabaseLayerDefinition({
     const color = existingGroupLayer?.color || getStableColor(`${tableName}-${dg}`);
     const baseStyle = buildLayerStyle(color, geometryType);
     const displayName = formatDatabaseLayerName(name || tableName);
-    const isBaseCartography = isCartographyBaseLayer({ dg });
+    const isBaseCartography = isCartographyBaseLayer({
+      dg,
+      name: displayName,
+      table_name: tableName,
+      databaseMetadata: metadata,
+    });
 
     const layer = {
       id: layerId,
@@ -1110,6 +1311,7 @@ function buildDatabaseLayerDefinition({
       estimatedFeatureCount: 0,
       loadStatus: existingGroupLayer?.loadStatus || 'idle',
       loadError: existingGroupLayer?.loadError || null,
+      loadErrorAt: existingGroupLayer?.loadErrorAt || null,
       loadRequested: existingGroupLayer
         ? existingGroupLayer.loadRequested
         : true,
@@ -1468,11 +1670,41 @@ export function GISWorkspaceProvider({ children }) {
     };
   }, []); // array vacío → solo corre una vez al montar la app
 
+  const fetchGeoJsonForDatabaseLayer = React.useCallback(
+    async (layer, options = {}) => {
+      const tableName = String(layer?.databaseTable || '').trim();
+      if (!tableName) return null;
+
+      const movilidadLayerId = resolveMovilidadLayerId(layer, tableName);
+      if (movilidadLayerId) {
+        try {
+          const movilidadGeoJson = await fetchMovilidadLayerGeoJSON(
+            movilidadLayerId,
+            options
+          );
+          if (movilidadGeoJson) {
+            return movilidadGeoJson;
+          }
+        } catch (error) {
+          if (error?.code !== 'MOVILIDAD_STATIC_NOT_FOUND') {
+            console.warn(
+              `[GIS API] Error cargando archivos de movilidad para ${movilidadLayerId}`,
+              error
+            );
+          }
+        }
+      }
+
+      return fetchLayerGeoJSON(tableName, options);
+    },
+    []
+  );
+
   const loadDatabaseLayer = React.useCallback(async (layer) => {
     const tableName = String(layer?.databaseTable || '').trim();
     if (!tableName) return;
 
-    const rawResponse = await fetchLayerGeoJSON(tableName);
+    const rawResponse = await fetchGeoJsonForDatabaseLayer(layer);
     const geoJson = normalizeLayerGeoJsonResponse(rawResponse, tableName);
 
     if (!geoJson || !Array.isArray(geoJson.features)) {
@@ -1511,7 +1743,7 @@ export function GISWorkspaceProvider({ children }) {
         features: geoJson.features.length,
       });
     }
-  }, []);
+  }, [fetchGeoJsonForDatabaseLayer]);
 
   const ensureDatabaseLayerLoaded = React.useCallback(async (layer) => {
     const tableName = String(layer?.databaseTable || '').trim();
@@ -1531,6 +1763,7 @@ export function GISWorkspaceProvider({ children }) {
                 ...currentLayer,
                 loadStatus: 'loading',
                 loadError: null,
+                loadErrorAt: null,
               }
             : currentLayer
         )
@@ -1542,7 +1775,7 @@ export function GISWorkspaceProvider({ children }) {
           return;
         }
 
-        const rawResponse = await fetchLayerGeoJSON(tableName);
+        const rawResponse = await fetchGeoJsonForDatabaseLayer(layer);
         const geoJson = normalizeLayerGeoJsonResponse(rawResponse, tableName);
 
         if (ENABLE_GIS_DEBUG_LOGS) {
@@ -1615,6 +1848,7 @@ export function GISWorkspaceProvider({ children }) {
                     error instanceof Error
                       ? error.message
                       : 'No se pudo cargar la capa.',
+                  loadErrorAt: Date.now(),
                 }
               : currentLayer
           )
@@ -1626,40 +1860,60 @@ export function GISWorkspaceProvider({ children }) {
 
     databaseLoadInFlightRef.current.set(tableName, requestPromise);
     await requestPromise;
-  }, [loadDatabaseLayer]);
+  }, [fetchGeoJsonForDatabaseLayer, loadDatabaseLayer]);
 
   React.useEffect(() => {
+    const nowMs = Date.now();
     const candidateLayers = layers.filter((layer) =>
-      shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds)
+      shouldLoadDatabaseLayerForViewport(layer, mapViewportBounds, nowMs)
     );
 
     if (!candidateLayers.length) return undefined;
 
-    let cancelled = false;
-    const queue = [...candidateLayers];
-    const workerCount = Math.min(
-      DATABASE_LAYER_LOAD_CONCURRENCY,
-      queue.length
+    const prioritizedLayers = sortLayersForViewportLoad(
+      candidateLayers,
+      mapViewportBounds,
+      selectedLayerId,
+      focusedLayerId
     );
+
+    let cancelled = false;
+    const queue = [...prioritizedLayers];
+    const workerCount = resolveDynamicLayerLoadConcurrency(queue.length);
 
     const loadVisibleLayers = async () => {
       await Promise.all(
         Array.from({ length: workerCount }, async () => {
+          let processedCount = 0;
           while (queue.length && !cancelled) {
             const nextLayer = queue.shift();
             if (!nextLayer) return;
             await ensureDatabaseLayerLoaded(nextLayer);
+            processedCount += 1;
+            if (processedCount % 2 === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
           }
         })
       );
     };
 
-    loadVisibleLayers();
+    loadVisibleLayers().catch((error) => {
+      if (!cancelled) {
+        console.warn('[GIS LOAD] Error en carga progresiva de capas', error);
+      }
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [ensureDatabaseLayerLoaded, layers, mapViewportBounds]);
+  }, [
+    ensureDatabaseLayerLoaded,
+    focusedLayerId,
+    layers,
+    mapViewportBounds,
+    selectedLayerId,
+  ]);
 
   // ── Valores derivados ──────────────────────────────────────────────────────
 
@@ -1738,9 +1992,19 @@ export function GISWorkspaceProvider({ children }) {
         if (layer.referenceLayer || layer.isBaseMap || layer.hideInLayersPanel) {
           return;
         }
-        (layer.data?.features || []).forEach((feature) => {
-          if (!isPointLikeGeometryType(feature?.geometry?.type)) return;
-          const workKey = buildFeatureUniqueWorkKey(feature);
+        const movilidadLayer = isMovilidadLayer(layer);
+        (layer.data?.features || []).forEach((feature, featureIndex) => {
+          const geometryType = feature?.geometry?.type;
+          if (movilidadLayer) {
+            if (!shouldCountFeature(feature, layer)) return;
+            if (!geometryType || isPointLikeGeometryType(geometryType)) return;
+          } else if (!isPointLikeGeometryType(geometryType)) {
+            return;
+          }
+
+          const workKey =
+            buildFeatureUniqueWorkKey(feature) ||
+            `${layer.id || 'layer'}:${featureIndex}`;
           if (!workKey) return;
           uniqueWorkKeys.add(workKey);
         });
@@ -1846,17 +2110,17 @@ export function GISWorkspaceProvider({ children }) {
                     };
                   }
                   const nextVisible = !layer.visible;
-                  return {
-                    ...layer,
-                    visible: nextVisible,
+            return {
+              ...layer,
+              visible: nextVisible,
                     loadRequested:
                       layer.databaseLayer && nextVisible
                         ? true
                         : layer.loadRequested,
                     loadStatus:
-                      nextVisible &&
-                      layer.databaseLayer &&
-                      layer.loadStatus === 'error'
+                    nextVisible &&
+                    layer.databaseLayer &&
+                    layer.loadStatus === 'error'
                         ? 'idle'
                         : layer.loadStatus,
                     loadError:
@@ -1865,6 +2129,12 @@ export function GISWorkspaceProvider({ children }) {
                       layer.loadStatus === 'error'
                         ? null
                         : layer.loadError,
+                    loadErrorAt:
+                      nextVisible &&
+                      layer.databaseLayer &&
+                      layer.loadStatus === 'error'
+                        ? null
+                        : layer.loadErrorAt,
                   };
                 })()
               : layer
@@ -1898,6 +2168,10 @@ export function GISWorkspaceProvider({ children }) {
                 visible && layer.databaseLayer && layer.loadStatus === 'error'
                   ? null
                   : layer.loadError,
+              loadErrorAt:
+                visible && layer.databaseLayer && layer.loadStatus === 'error'
+                  ? null
+                  : layer.loadErrorAt,
             };
           })
         );
@@ -1934,11 +2208,37 @@ export function GISWorkspaceProvider({ children }) {
                 layer.loadStatus === 'error'
                   ? null
                   : layer.loadError,
+              loadErrorAt:
+                layer.id === layerId &&
+                layer.databaseLayer &&
+                layer.loadStatus === 'error'
+                  ? null
+                  : layer.loadErrorAt,
             };
           })
         );
         setSelectedLayerId(layerId);
         setFocusedLayerId(layerId);
+      },
+
+      // Fuerza recarga de una capa de base de datos en estado de error.
+      retryDatabaseLayerLoad(layerId) {
+        setLayers((currentLayers) =>
+          currentLayers.map((layer) => {
+            if (layer.id !== layerId || !layer.databaseLayer) {
+              return layer;
+            }
+
+            return {
+              ...layer,
+              visible: true,
+              loadRequested: true,
+              loadStatus: 'idle',
+              loadError: null,
+              loadErrorAt: null,
+            };
+          })
+        );
       },
 
       // Selecciona y enfoca una capa (sin afectar la visibilidad de las demás)

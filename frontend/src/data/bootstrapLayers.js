@@ -1,6 +1,5 @@
 import cetramData from './bootstrap/cetram.json';
 import cicloviaData from './bootstrap/ciclovia.json';
-import escuelas123Data from './bootstrap/escuelas_123.json';
 import utopiasData from './bootstrap/utopias.json';
 
 function getGeometryType(featureCollection) {
@@ -106,20 +105,6 @@ const LAYER_SPECS = [
       alcaldia: 'Coyoacán',
       progressValues: [63, 48, 71],
       riskIndexes: [1],
-    },
-  },
-  {
-    id: 'bootstrap-escuelas-123',
-    name: '1, 2, 3 por mi Escuela',
-    source: 'SIG-SOBSE curado',
-    color: '#6366f1',
-    rawData: escuelas123Data,
-    metadata: {
-      dg: 'DG Construcción de Obras Públicas',
-      programa: '1_2_3_por_mi_escuela',
-      alcaldia: 'Múltiples',
-      progressValues: [82, 55, 38, 91, 20, 67, 74, 48, 30, 95],
-      riskIndexes: [2, 4, 8],
     },
   },
 ];

@@ -20,16 +20,11 @@ export const layerIcons = {
   'ECOBICI':       '/logos/BICIESTACIONAMIENTO.png',
 
   // Educación
-  'ESCUELA':             '/logos/ESCUELAS.png',
-  'COLEGIO':             '/logos/ESCUELAS.png',
-  'PLANTEL':             '/logos/ESCUELAS.png',
-  // Programa "1, 2, 3 por mi escuela" — múltiples formatos de nombre de tabla
-  '1_2_3':               '/logos/1_2_3_PORMIESCUELA.png',
-  '1, 2, 3':             '/logos/1_2_3_PORMIESCUELA.png',
-  '1,2,3':               '/logos/1_2_3_PORMIESCUELA.png',
-  '123':                 '/logos/1_2_3_PORMIESCUELA.png',
-  'POR MI ESCUELA':      '/logos/1_2_3_PORMIESCUELA.png',
-  'PORMIESCUELA':        '/logos/1_2_3_PORMIESCUELA.png',
+  'ESCUELA':       '/logos/ESCUELAS.png',
+  'COLEGIO':       '/logos/ESCUELAS.png',
+  'PLANTEL':       '/logos/ESCUELAS.png',
+  '1, 2, 3':       '/logos/1_2_3_PORMIESCUELA.png',
+  '123':           '/logos/1_2_3_PORMIESCUELA.png',
 
   // Equipamiento urbano
   'UTOPIA':        '/logos/utopiaaaa.png',

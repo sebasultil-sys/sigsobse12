@@ -1,6 +1,5 @@
 import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
-import { fetchSearch } from '../../services/gisApi';
 
 const SEARCH_LOGO_SRC = process.env.PUBLIC_URL + '/assets/img/nuevologoSinfondo.png';
 
@@ -182,39 +181,9 @@ function getRankedResults(searchIndex, query) {
     .slice(0, MAX_RESULTS);
 }
 
-// Formatea el nombre de una tabla de BD en un nombre legible para mostrar en UI.
-// "canchas_mundialistas_dgcop" → "Canchas Mundialistas Dgcop"
-function formatTableName(name) {
-  return String(name || '')
-    .replace(/[_]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-// Extrae el título de un resultado de BD a partir de sus propiedades.
-function buildDbResultTitle(properties) {
-  return (
-    firstPropertyValue(properties, FIELD_KEYS.obra) ||
-    firstPropertyValue(properties, FIELD_KEYS.plantel) ||
-    firstPropertyValue(properties, FIELD_KEYS.direccion) ||
-    firstPropertyValue(properties, FIELD_KEYS.programa) ||
-    'Elemento sin nombre'
-  );
-}
-
-function buildDbResultSubtitle(properties, layerName) {
-  const programa = firstPropertyValue(properties, FIELD_KEYS.programa);
-  const alcaldia = firstPropertyValue(properties, FIELD_KEYS.alcaldia);
-  const dg       = firstPropertyValue(properties, FIELD_KEYS.dg);
-  return [programa || layerName, alcaldia, dg].filter(Boolean).join(' · ');
-}
-
 function MobileSearchPanel({ onClose }) {
   const { actions, filteredLayers, layers, mapApi } = useGISWorkspace();
   const [query, setQuery] = React.useState('');
-  const [dbResults, setDbResults] = React.useState([]);
-  const [isDbSearching, setIsDbSearching] = React.useState(false);
   const inputRef = React.useRef(null);
 
   // Foco automático al abrir el panel
@@ -222,30 +191,6 @@ function MobileSearchPanel({ onClose }) {
     const timer = setTimeout(() => inputRef.current?.focus(), 80);
     return () => clearTimeout(timer);
   }, []);
-
-  // Búsqueda en base de datos con debounce de 300ms.
-  // Complementa la búsqueda local: solo muestra resultados de capas aún NO cargadas.
-  React.useEffect(() => {
-    if (normalize(query).length < 2) {
-      setDbResults([]);
-      setIsDbSearching(false);
-      return;
-    }
-
-    setIsDbSearching(true);
-    const timer = setTimeout(async () => {
-      try {
-        const response = await fetchSearch(query);
-        setDbResults(response.results || []);
-      } catch {
-        setDbResults([]);
-      } finally {
-        setIsDbSearching(false);
-      }
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [query]);
 
   const filteredFeatureKeys = React.useMemo(() => {
     const keys = new Set();
@@ -276,50 +221,6 @@ function MobileSearchPanel({ onClose }) {
     () => getRankedResults(searchIndex, query),
     [query, searchIndex]
   );
-
-  // Resultados de BD que corresponden a capas NO cargadas en memoria.
-  // Las capas ya cargadas ya aparecen en `results` (búsqueda local), evitando duplicados.
-  const filteredDbResults = React.useMemo(() => {
-    return dbResults.filter((result) => {
-      const layerId = `db-${result.table}`;
-      const layer = layers.find((l) => l.id === layerId);
-      return !layer || layer.loadStatus !== 'loaded';
-    });
-  }, [dbResults, layers]);
-
-  // Click en un resultado de BD: activa la capa, centra el mapa y abre la ficha.
-  const handleSelectDbResult = React.useCallback((result) => {
-    const layerId = `db-${result.table}`;
-    const matchingLayer = layers.find((l) => l.id === layerId);
-
-    if (matchingLayer && !matchingLayer.visible) {
-      actions.toggleLayerVisibility(layerId);
-    }
-    if (matchingLayer) {
-      actions.focusLayer(layerId);
-    }
-
-    actions.setInteractionMode('select');
-    onClose();
-
-    const syntheticFeature = {
-      type: 'Feature',
-      geometry: result.geometry,
-      properties: result.properties || {},
-      layerName: formatTableName(result.layerName || result.table),
-    };
-
-    window.setTimeout(() => {
-      actions.setSelectedFeature({
-        feature: syntheticFeature,
-        layerId: matchingLayer?.id || null,
-        layerName: formatTableName(result.layerName || result.table),
-        properties: result.properties || {},
-      });
-      mapApi?.zoomToFeatureBounds?.(syntheticFeature);
-      mapApi?.invalidateSize?.();
-    }, 140);
-  }, [actions, layers, mapApi, onClose]);
 
   const handleSelect = ({ feature, layer }) => {
     const featureKey = feature?.properties?.__featureKey || null;
@@ -400,7 +301,7 @@ function MobileSearchPanel({ onClose }) {
         </div>
       )}
 
-      {hasQuery && results.length === 0 && filteredDbResults.length === 0 && !isDbSearching && (
+      {hasQuery && results.length === 0 && (
         <div className="msearch__empty">
           <span>Sin resultados para</span>
           <strong>"{query}"</strong>
@@ -439,46 +340,6 @@ function MobileSearchPanel({ onClose }) {
                     </span>
                   )}
                   {isRisk && <span className="msearch__risk-badge">Riesgo</span>}
-                  <svg aria-hidden="true" fill="none" height="16" viewBox="0 0 16 16" width="16" xmlns="http://www.w3.org/2000/svg">
-                    <path d="m6 4 4 4-4 4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
-                  </svg>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Resultados de la base de datos (capas no cargadas en memoria) */}
-      {isDbSearching && (
-        <div className="msearch__db-status">Buscando en base de datos…</div>
-      )}
-
-      {!isDbSearching && filteredDbResults.length > 0 && (
-        <div className="msearch__results msearch__results--db">
-          <span className="msearch__count msearch__count--db">
-            {filteredDbResults.length} en base de datos
-          </span>
-          {filteredDbResults.map((result, idx) => {
-            const title    = buildDbResultTitle(result.properties);
-            const subtitle = buildDbResultSubtitle(result.properties, result.layerName);
-            const layerLabel = formatTableName(result.layerName || result.table);
-            return (
-              <button
-                className="msearch__result msearch__result--db"
-                key={`db-${result.table}-${idx}`}
-                onClick={() => handleSelectDbResult(result)}
-                type="button"
-              >
-                <span className="msearch__result-dot msearch__result-dot--db" />
-                <div className="msearch__result-info">
-                  <strong>{title}</strong>
-                  {subtitle && <span>{subtitle}</span>}
-                </div>
-                <div className="msearch__result-right">
-                  <span className="msearch__group-badge msearch__group-badge--db">
-                    {layerLabel}
-                  </span>
                   <svg aria-hidden="true" fill="none" height="16" viewBox="0 0 16 16" width="16" xmlns="http://www.w3.org/2000/svg">
                     <path d="m6 4 4 4-4 4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
                   </svg>

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 import { getLayerStatus } from '../layers/layerStatus';
-import { getLayerDgs, getLayerGroupLabel, orderLayerGroupEntries } from '../layers/layerGroups';
+import { getLayerGroupLabel, orderLayerGroupEntries } from '../layers/layerGroups';
 import { getLayerIcon } from '../../config/layerIcons';
 
 // Símbolo de geometría de reserva cuando no hay icono personalizado
@@ -42,6 +42,16 @@ function getLayerDisplayName(layer) {
     .trim();
 }
 
+function getLayerStatusClass(tone) {
+  if (tone === 'on') return 'lp-layer__status--on';
+  if (tone === 'loading') return 'lp-layer__status--loading';
+  if (tone === 'error') return 'lp-layer__status--error';
+  if (tone === 'waiting') return 'lp-layer__status--waiting';
+  if (tone === 'off') return 'lp-layer__status--off';
+  if (tone === 'empty') return 'lp-layer__status--empty';
+  return 'lp-layer__status--pending';
+}
+
 function LayerToggle({ checked, label, onChange }) {
   return (
     <label
@@ -69,26 +79,27 @@ function MobileLayersPanel() {
     mapViewportBounds,
     visibleLayerCount,
   } = useGISWorkspace();
+  const manageableLayers = React.useMemo(
+    () =>
+      layers.filter(
+        (layer) =>
+          !layer.referenceLayer && !layer.isBaseMap && !layer.hideInLayersPanel
+      ),
+    [layers]
+  );
 
   const groups = React.useMemo(() => {
     const map = new Map();
     // Ocultar capas de referencia (ej. Límite CDMX) del panel móvil.
     // Siguen visibles en el mapa — solo se esconden del listado.
-    layers
-      .filter((layer) => !layer.referenceLayer && !layer.isBaseMap)
+    manageableLayers
       .forEach((layer) => {
-        // getLayerDgs lee todos los DGs únicos de los features de la capa.
-        // Si la capa mezcla DGs (p.ej. DGCOP y DGUV), aparece en ambos grupos.
-        getLayerDgs(layer).forEach((dg) => {
-          if (!map.has(dg)) map.set(dg, []);
-          const bucket = map.get(dg);
-          if (!bucket.find((l) => l.id === layer.id)) {
-            bucket.push(layer);
-          }
-        });
+        const dg = layer.dg || 'Sin DG';
+        if (!map.has(dg)) map.set(dg, []);
+        map.get(dg).push(layer);
       });
     return orderLayerGroupEntries([...map.entries()]);
-  }, [layers]);
+  }, [manageableLayers]);
 
   const layerStatusById = React.useMemo(() => {
     const statusMap = new Map();
@@ -111,10 +122,11 @@ function MobileLayersPanel() {
           acc.loaded += 1;
         }
         if (layer.loadStatus === 'loading') acc.loading += 1;
+        if (status?.tone === 'error') acc.error += 1;
         if (status?.tone === 'waiting') acc.waiting += 1;
         return acc;
       },
-      { loaded: 0, loading: 0, waiting: 0 }
+      { loaded: 0, loading: 0, waiting: 0, error: 0 }
     );
   }, [layerStatusById, layers]);
 
@@ -126,7 +138,7 @@ function MobileLayersPanel() {
       <div className="lp-header">
         <div className="lp-stats lp-stats--rich">
           <span><strong>{visibleLayerCount}</strong> activas</span>
-          <span><strong>{layers.length}</strong> total</span>
+          <span><strong>{manageableLayers.length}</strong> total</span>
         </div>
         <div className="lp-actions">
           <button className="lp-action-btn" onClick={() => actions.setAllLayersVisible(true)} type="button">
@@ -136,6 +148,16 @@ function MobileLayersPanel() {
             Apagar todas
           </button>
         </div>
+        {summary.loading > 0 && (
+          <div className="lp-panel-note">
+            {summary.loading} capa{summary.loading !== 1 ? 's' : ''} cargando geometrías
+          </div>
+        )}
+        {summary.error > 0 && (
+          <div className="lp-panel-note lp-panel-note--error">
+            {summary.error} capa{summary.error !== 1 ? 's' : ''} con error de carga
+          </div>
+        )}
         {summary.waiting > 0 && (
           <div className="lp-panel-note">
             {summary.waiting} capa{summary.waiting !== 1 ? 's' : ''} se cargarán al entrar a su zona
@@ -149,6 +171,12 @@ function MobileLayersPanel() {
           const visibleInGroup = dgLayers.filter((l) => l.visible).length;
           const loadingInGroup = dgLayers.filter(
             (l) => l.loadStatus === 'loading'
+          ).length;
+          const errorInGroup = dgLayers.filter(
+            (l) => layerStatusById.get(l.id)?.tone === 'error'
+          ).length;
+          const waitingInGroup = dgLayers.filter(
+            (l) => layerStatusById.get(l.id)?.tone === 'waiting'
           ).length;
           const hasRisk = dgLayers.some(
             (l) => (layerMetricsById.get(l.id)?.riskCount || 0) > 0
@@ -174,7 +202,13 @@ function MobileLayersPanel() {
                 </span>
                 <span className="lp-group__name">{getLayerGroupLabel(dg)}</span>
                 {loadingInGroup > 0 && (
-                  <span className="lp-group__meta">{loadingInGroup} cargando</span>
+                  <span className="lp-group__meta lp-group__meta--loading">{loadingInGroup} cargando</span>
+                )}
+                {errorInGroup > 0 && (
+                  <span className="lp-group__meta lp-group__meta--error">{errorInGroup} error</span>
+                )}
+                {waitingInGroup > 0 && (
+                  <span className="lp-group__meta lp-group__meta--waiting">{waitingInGroup} espera</span>
                 )}
                 <span className="lp-group__count">{visibleInGroup}/{dgLayers.length}</span>
                 {hasRisk && <span className="lp-group__risk" />}
@@ -186,6 +220,8 @@ function MobileLayersPanel() {
                     const metrics = layerMetricsById.get(layer.id) || {};
                     const isRisk = (metrics.riskCount || 0) > 0;
                     const displayName = getLayerDisplayName(layer);
+                    const status = layerStatusById.get(layer.id);
+                    const statusClass = getLayerStatusClass(status?.tone);
 
                     return (
                       <div
@@ -194,13 +230,32 @@ function MobileLayersPanel() {
                       >
                         <div className="lp-layer__main">
                           <LayerIcon layer={layer} />
-                          <span className="lp-layer__name" title={displayName}>{displayName}</span>
+                          <div className="lp-layer__info">
+                            <strong title={displayName}>{displayName}</strong>
+                            <div className="lp-layer__meta">
+                              <span>{status?.detail || 'Sin detalle disponible'}</span>
+                              <span className={`lp-layer__status ${statusClass}`}>
+                                {status?.label || 'Estado'}
+                              </span>
+                            </div>
+                          </div>
                           <LayerToggle
                             checked={layer.visible}
                             label={`${layer.visible ? 'Apagar' : 'Encender'} ${displayName}`}
                             onChange={() => actions.toggleLayerVisibility(layer.id)}
                           />
                         </div>
+                        {status?.tone === 'error' && (
+                          <div className="lp-layer__actions">
+                            <button
+                              className="lp-btn lp-btn--accent"
+                              onClick={() => actions.retryDatabaseLayerLoad(layer.id)}
+                              type="button"
+                            >
+                              Reintentar
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}

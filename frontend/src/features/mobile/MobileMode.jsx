@@ -6,7 +6,6 @@ import BottomSheet from './BottomSheet';
 import MobileLayersPanel from './MobileLayersPanel';
 import MobileSearchPanel from './MobileSearchPanel';
 import MobileDashboardPanel from './MobileDashboardPanel';
-import MobileToolsPanel from './MobileToolsPanel';
 import MobileMorePanel from './MobileMorePanel';
 import MobileFeatureCard from './MobileFeatureCard';
 import MobileOnboarding, { shouldShowOnboarding } from './MobileOnboarding';
@@ -16,7 +15,6 @@ const SHEET_META = {
   layers:    { title: 'Capas',              subtitle: 'Administra la información visible en el mapa' },
   search:    { title: 'Buscar',             subtitle: 'Obras por plantel, dirección, colonia o programa' },
   dashboard: { title: 'Indicadores',        subtitle: 'Avance, riesgos y semaforización' },
-  tools:     { title: 'Herramientas',       subtitle: 'Medición, dibujo y análisis espacial' },
   more:      { title: 'Más',               subtitle: 'Leyenda, mapa base y guía de uso' },
   table:     { title: 'Tabla de atributos', subtitle: 'Explora y filtra los datos de la capa' },
 };
@@ -62,6 +60,7 @@ function MobileMode() {
   const showExitButton = mobileModeManual && !isCompactViewport;
 
   const handleNavSelect = (sheetId) => {
+    if (sheetId === 'tools') return;
     if (mobileSheet === sheetId) {
       actions.closeMobileSheet();
     } else {
@@ -70,6 +69,11 @@ function MobileMode() {
   };
 
   const meta = SHEET_META[mobileSheet] || { title: '', subtitle: '' };
+
+  React.useEffect(() => {
+    if (mobileSheet !== 'tools') return;
+    actions.closeMobileSheet();
+  }, [actions, mobileSheet]);
 
   // Pantalla de bloqueo para modo horizontal
   if (isLandscape) {
@@ -93,22 +97,15 @@ function MobileMode() {
   if (mobileSheet === 'layers')    panelContent = <MobileLayersPanel />;
   if (mobileSheet === 'search')    panelContent = <MobileSearchPanel onClose={actions.closeMobileSheet} />;
   if (mobileSheet === 'dashboard') panelContent = <MobileDashboardPanel />;
-  if (mobileSheet === 'tools')     panelContent = <MobileToolsPanel onClose={actions.closeMobileSheet} />;
   if (mobileSheet === 'more')      panelContent = <MobileMorePanel />;
   if (mobileSheet === 'table')     panelContent = <AttributeTableSheet />;
 
   return (
-  <div
-    className={`mobile-mode${
-      isCompactViewport ? ' is-compact' : ' is-desktop-simulator'
-    }`}
-    style={{
-      width: '100vw',
-      height: '100dvh', // 🔥 ESTE ES EL CAMBIO CLAVE
-      overflow: 'hidden'
-    }}
-  >
-    
+    <div
+      className={`mobile-mode${
+        isCompactViewport ? ' is-compact' : ' is-desktop-simulator'
+      }`}
+    >
       {!isCompactViewport && <div className="mobile-mode__backdrop" />}
 
       <section className="mobile-mode__device">
@@ -131,7 +128,6 @@ function MobileMode() {
         <div className="mobile-mode__map-shell">
           <MapView mode="mobile" />
         </div>
-
 
         {/* TOP BAR — Google Maps style */}
         <header className="mtopbar">

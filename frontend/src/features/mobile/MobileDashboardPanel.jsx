@@ -1,5 +1,6 @@
 import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
+import { shouldCountFeature } from '../map/movilidadLayerUtils';
 
 const ANALYSIS_VIEWS = [
   { id: 'general', label: 'General' },
@@ -184,6 +185,7 @@ function MobileDashboardPanel() {
       scopedLayers.flatMap((layer) =>
         (layer.data?.features || []).map((feature) => ({
           layer,
+          feature,
           properties: feature?.properties || {},
         }))
       ),
@@ -270,7 +272,8 @@ function MobileDashboardPanel() {
   // Conteo de obras por estatus: proceso / terminado / entregado / sin iniciar
   const statusCounts = React.useMemo(() => {
     const counts = { proceso: 0, terminado: 0, entregado: 0, 'sin iniciar': 0, otro: 0 };
-    scopedFeatures.forEach(({ properties }) => {
+    scopedFeatures.forEach(({ layer, feature, properties }) => {
+      if (!shouldCountFeature(feature, layer)) return;
       let resolved = null;
       for (const key of STATUS_ICON_KEYS_LOCAL) {
         const raw = properties?.[key];

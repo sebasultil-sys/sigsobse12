@@ -1,7 +1,11 @@
+import SearchBar from "../shared/SearchBar";
+
 function WorkspaceHeader({
   activeBaseMapName,
   filteredFeatureCount,
   layerCount,
+  modeToggleLabel,
+  onModeToggle,
   visibleLayerCount,
 }) {
   return (
@@ -14,8 +18,8 @@ function WorkspaceHeader({
             alt="SOBSE"
             className="workspace-header__logo-img"
             onError={(e) => {
-              e.target.style.display = 'none';
-              e.target.nextSibling.style.display = 'flex';
+              e.target.style.display = "none";
+              e.target.nextSibling.style.display = "flex";
             }}
           />
           <span className="workspace-header__logo-fallback" aria-hidden="true">
@@ -32,6 +36,11 @@ function WorkspaceHeader({
             Sistema Institucional de Información Geoespacial
           </p>
         </div>
+      </div>
+
+      {/* ── Search Bar ────────────────────────────────────────── */}
+      <div className="workspace-header__search">
+        <SearchBar />
       </div>
 
       {/* ── KPI Chips ─────────────────────────────────────────── */}
@@ -56,8 +65,22 @@ function WorkspaceHeader({
         </div>
       </div>
 
+      {typeof onModeToggle === "function" ? (
+        <button
+          className="workspace-header__mode-toggle"
+          onClick={onModeToggle}
+          type="button"
+        >
+          {modeToggleLabel || "Vista principal"}
+        </button>
+      ) : null}
+
       {/* ── Avatar ───────────────────────────────────────────── */}
-      <div className="workspace-header__avatar" aria-label="Usuario" title="Usuario">
+      <div
+        className="workspace-header__avatar"
+        aria-label="Usuario"
+        title="Usuario"
+      >
         <span className="workspace-header__avatar-initials">DG</span>
       </div>
     </header>

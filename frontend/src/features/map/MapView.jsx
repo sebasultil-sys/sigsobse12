@@ -29,6 +29,7 @@ import {
 } from './GeoJsonLayer';
 import { fitVisibleLayers } from './FitVisibleLayers';
 import { getLayerStatus } from '../layers/layerStatus';
+import { isMovilidadLayer, shouldCountFeature } from './movilidadLayerUtils';
 
 const DEFAULT_CENTER = [19.4326, -99.1332];
 const DEFAULT_ZOOM = 11;
@@ -40,6 +41,7 @@ const PROXIMITY_BAND_MINUTES = [5, 15, 20];
 const BUFFER_QUERY_YIELD_EVERY = 80;
 const BUFFER_MAX_SOURCE_FEATURES = 360;
 const POPULATION_RADIUS_MAX_KM = 10;
+const HOTSPOT_BUFFER_MAX_KM = 25;
 const POPULATION_GEOJSON_FILENAME = 'inegi_poblacion_cdmx.geojson';
 const ADVANCED_TOP_MENUS = ['layers', 'panel', 'tools', 'more'];
 const TOOLS_OPERATION_SET = new Set([
@@ -169,6 +171,18 @@ const KPI_WORK_ID_KEYS = [
   'IDOBRA',
   'idobra',
 ];
+const FEATURE_ALCALDIA_KEYS = [
+  'ALCALDIA',
+  'alcaldia',
+  'ALCALDÍA',
+  'alcaldía',
+  'DEMARCACION',
+  'demarcacion',
+  'DEMARCACIÓN',
+  'demarcación',
+  'MUNICIPIO',
+  'municipio',
+];
 const STATUS_PRIORITY = {
   entregado: 4,
   terminado: 3,
@@ -185,42 +199,15 @@ const STATIC_EXECUTIVE_KPIS = {
   enProceso: 580,
   sinIniciar: 177,
 };
-const KPI_STATUS_STORAGE_KEY = 'sigsobse_kpi_status_filter';
-const VALID_KPI_STATUS_VALUES = new Set([
-  'entregado',
-  'terminado',
-  'proceso',
-  'sin iniciar',
-]);
 const ENABLE_GIS_DEBUG_LOGS =
   String(process.env.REACT_APP_GIS_DEBUG_LOGS || '').toLowerCase() === 'true';
 const USE_CANVAS_RENDERER =
   String(process.env.REACT_APP_GIS_PREFER_CANVAS || '').toLowerCase() === 'true';
-
-function readSavedKpiStatusFilter() {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage?.getItem(KPI_STATUS_STORAGE_KEY);
-    if (!raw) return null;
-    return VALID_KPI_STATUS_VALUES.has(raw) ? raw : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeSavedKpiStatusFilter(status) {
-  if (typeof window === 'undefined') return;
-  try {
-    if (!status) {
-      window.localStorage?.removeItem(KPI_STATUS_STORAGE_KEY);
-      return;
-    }
-    if (!VALID_KPI_STATUS_VALUES.has(status)) return;
-    window.localStorage?.setItem(KPI_STATUS_STORAGE_KEY, status);
-  } catch {
-    // localStorage puede estar bloqueado en modo incógnito.
-  }
-}
+const CURRENCY_FORMATTER = new Intl.NumberFormat('es-MX', {
+  style: 'currency',
+  currency: 'MXN',
+  maximumFractionDigits: 0,
+});
 
 function buildStaticKpiSummaryPayload() {
   return {
@@ -237,6 +224,21 @@ function buildStaticKpiSummaryPayload() {
     by_table: [],
     source: 'static-fallback',
   };
+}
+
+function parseKpiCount(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[^0-9.-]+/g, '');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function normalizeStatusValue(rawValue) {
@@ -296,6 +298,27 @@ function buildFeatureWorkKey(feature) {
   return workId.toUpperCase();
 }
 
+function readFirstStringProperty(properties = {}, keys = []) {
+  for (const key of keys) {
+    const raw = properties?.[key];
+    if (raw == null) continue;
+    const value = String(raw).trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function resolveFeatureAlcaldia(properties = {}) {
+  return readFirstStringProperty(properties, FEATURE_ALCALDIA_KEYS) || 'Sin alcaldía';
+}
+
+function resolveGeometryBucket(geometryType) {
+  if (geometryType === 'Point' || geometryType === 'MultiPoint') return 'point';
+  if (geometryType === 'LineString' || geometryType === 'MultiLineString') return 'line';
+  if (geometryType === 'Polygon' || geometryType === 'MultiPolygon') return 'polygon';
+  return 'other';
+}
+
 function isPointLikeGeometry(geometryType) {
   return geometryType === 'Point' || geometryType === 'MultiPoint';
 }
@@ -322,7 +345,11 @@ function filterLayersByStatus(layers = [], statusFilter = null) {
 
     const filteredFeatures = sourceFeatures.filter((feature) => {
       const geometryType = feature?.geometry?.type;
-      if (!isPointLikeGeometry(geometryType)) return false;
+      if (isMovilidadLayer(layer)) {
+        if (!shouldCountFeature(feature, layer)) return false;
+      } else if (!isPointLikeGeometry(geometryType)) {
+        return false;
+      }
       return resolveFeatureStatus(feature?.properties || {}) === statusFilter;
     });
 
@@ -387,49 +414,6 @@ const EMPTY_DRAW_DRAFT = {
   type: null,
   points: [],
 };
-
-// ── Capas de transporte renderizadas como puntos ──────────────────────────────
-// Estas capas tienen geometría de línea en PostGIS pero en el mapa se muestran
-// como CircleMarkers (un punto por estación/parada).
-// La leyenda las sigue tratando como "línea" — solo cambia el render visual.
-const TRANSPORT_LAYER_NAMES = ['CABLEBUS', 'TREN LIGERO', 'TROLEBUS'];
-
-function isTransportLayer(name) {
-  return TRANSPORT_LAYER_NAMES.some((t) => (name || '').toUpperCase().includes(t));
-}
-
-// Devuelve el punto representativo de una geometría (centro de línea, primer vértice, etc.)
-// No muta nada — crea un nuevo objeto GeoJSON Point.
-function geometryToMidpoint(geometry) {
-  if (!geometry) return null;
-  if (geometry.type === 'Point') return geometry;
-  if (geometry.type === 'MultiPoint') {
-    return { type: 'Point', coordinates: geometry.coordinates[0] };
-  }
-  if (geometry.type === 'LineString') {
-    const coords = geometry.coordinates;
-    return { type: 'Point', coordinates: coords[Math.floor(coords.length / 2)] };
-  }
-  if (geometry.type === 'MultiLineString') {
-    const line = geometry.coordinates[0] || [];
-    return { type: 'Point', coordinates: line[Math.floor(line.length / 2)] };
-  }
-  return null;
-}
-
-// Devuelve un nuevo objeto capa con todas las geometrías convertidas a puntos.
-// El objeto original (layer.data) NO se modifica.
-function toPointLayer(layer) {
-  const pointFeatures = (layer.data?.features || []).reduce((acc, feature) => {
-    const midpoint = geometryToMidpoint(feature.geometry);
-    if (midpoint) acc.push({ ...feature, geometry: midpoint });
-    return acc;
-  }, []);
-  return {
-    ...layer,
-    data: { ...layer.data, features: pointFeatures },
-  };
-}
 
 function formatDistance(meters) {
   if (meters >= METERS_PER_KILOMETER) {
@@ -584,6 +568,12 @@ function isDrawMode(mode) {
 
 function formatPopulationValue(value) {
   return Number(value || 0).toLocaleString('es-MX');
+}
+
+function formatCurrencyValue(value) {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed)) return CURRENCY_FORMATTER.format(0);
+  return CURRENCY_FORMATTER.format(parsed);
 }
 
 function clampNumber(value, min, max) {
@@ -1910,12 +1900,11 @@ function MapView({ mode = 'desktop' }) {
   const [isFullscreenActive, setIsFullscreenActive] = React.useState(false);
   const [activeTool, setActiveTool] = React.useState(null);
   const [activeMenu, setActiveMenu] = React.useState(null);
-  const [selectedKpiStatus, setSelectedKpiStatus] = React.useState(
-    () => readSavedKpiStatusFilter()
-  );
+  const [selectedKpiStatus, setSelectedKpiStatus] = React.useState(null);
   const [globalKpiSummary, setGlobalKpiSummary] = React.useState(null);
   const [globalKpiLoading, setGlobalKpiLoading] = React.useState(false);
   const [globalKpiError, setGlobalKpiError] = React.useState('');
+  const globalKpiSummaryRef = React.useRef(null);
   const [isOffline, setIsOffline] = React.useState(() =>
     typeof navigator !== 'undefined' ? !navigator.onLine : false
   );
@@ -1925,6 +1914,9 @@ function MapView({ mode = 'desktop' }) {
     'measure-distance'
   );
   const [analysisMode, setAnalysisMode] = React.useState('population');
+  const [hotspotMode, setHotspotMode] = React.useState('count');
+  const [hotspotBufferKm, setHotspotBufferKm] = React.useState(0);
+  const [hotspotAnalysisSummary, setHotspotAnalysisSummary] = React.useState(null);
   const [bufferRadiusKm, setBufferRadiusKm] = React.useState(1);
   const [bufferSourceMode, setBufferSourceMode] = React.useState('click-point');
   const [bufferDistanceUnit, setBufferDistanceUnit] = React.useState('km');
@@ -1948,10 +1940,6 @@ function MapView({ mode = 'desktop' }) {
     () => filterLayersByStatus(filteredLayers, selectedKpiStatus),
     [filteredLayers, selectedKpiStatus]
   );
-
-  React.useEffect(() => {
-    writeSavedKpiStatusFilter(selectedKpiStatus);
-  }, [selectedKpiStatus]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -2059,6 +2047,11 @@ function MapView({ mode = 'desktop' }) {
   const adjustBufferRadius = React.useCallback((delta) => {
     setBufferRadiusKm((current) =>
       Number(clampNumber(current + delta, 0.5, 30).toFixed(1))
+    );
+  }, []);
+  const adjustHotspotBuffer = React.useCallback((delta) => {
+    setHotspotBufferKm((current) =>
+      Number(clampNumber(current + delta, 0, HOTSPOT_BUFFER_MAX_KM).toFixed(1))
     );
   }, []);
   const activeAnalysisMode = React.useMemo(
@@ -2194,48 +2187,90 @@ function MapView({ mode = 'desktop' }) {
   }, [layers]);
 
   React.useEffect(() => {
-    if (USE_STATIC_EXECUTIVE_KPIS) {
-      setGlobalKpiSummary(buildStaticKpiSummaryPayload());
-      setGlobalKpiLoading(false);
-      setGlobalKpiError('');
-      return () => {};
-    }
+    globalKpiSummaryRef.current = globalKpiSummary;
+  }, [globalKpiSummary]);
 
-    let cancelled = false;
-    setGlobalKpiLoading(true);
-    setGlobalKpiError('');
-
-    fetchKpiSummary({ force: true })
-      .then((payload) => {
-        if (cancelled) return;
-        setGlobalKpiSummary(payload || null);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        const errorMessage = String(error?.message || '');
-        const isMissingKpiRoute =
-          error?.status === 404 ||
-          errorMessage.toLowerCase().includes('ruta no encontrada');
-        if (isMissingKpiRoute) {
-          // Fallback temporal para entornos donde el backend desplegado aún no
-          // incluye /kpis/summary.
-          setGlobalKpiSummary(buildStaticKpiSummaryPayload());
-          setGlobalKpiError('');
-          return;
-        }
-        setGlobalKpiError(
-          'No se pudieron actualizar los KPIs; se mantiene la última información disponible.'
-        );
-      })
-      .finally(() => {
-        if (cancelled) return;
+  const requestGlobalKpiSummary = React.useCallback(
+    (options = {}) => {
+      const { force = false, silent = false } = options;
+      const hasSummary = Boolean(globalKpiSummaryRef.current);
+      if (USE_STATIC_EXECUTIVE_KPIS) {
+        setGlobalKpiSummary(buildStaticKpiSummaryPayload());
         setGlobalKpiLoading(false);
-      });
+        setGlobalKpiError('');
+        return Promise.resolve();
+      }
+
+      let cancelled = false;
+      if (!silent) {
+        setGlobalKpiLoading(true);
+      }
+      if (!silent || !hasSummary) {
+        setGlobalKpiError('');
+      }
+
+      const requestPromise = fetchKpiSummary({ force })
+        .then((payload) => {
+          if (cancelled) return;
+          setGlobalKpiSummary(payload || null);
+          setGlobalKpiError('');
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          const errorMessage = String(error?.message || '');
+          const isMissingKpiRoute =
+            error?.status === 404 ||
+            errorMessage.toLowerCase().includes('ruta no encontrada');
+          if (isMissingKpiRoute) {
+            setGlobalKpiSummary(buildStaticKpiSummaryPayload());
+            setGlobalKpiError('');
+            return;
+          }
+
+          // Si falla la red/API y aún no tenemos resumen, usamos fallback canónico
+          // para evitar que el panel se quede con subtotales parciales de capas cargadas.
+          if (!hasSummary) {
+            setGlobalKpiSummary(buildStaticKpiSummaryPayload());
+          }
+          setGlobalKpiError(
+            'No se pudieron actualizar los KPIs globales en este momento.'
+          );
+        })
+        .finally(() => {
+          if (cancelled) return;
+          if (!silent) {
+            setGlobalKpiLoading(false);
+          }
+        });
+
+      requestPromise.cancel = () => {
+        cancelled = true;
+      };
+
+      return requestPromise;
+    },
+    []
+  );
+
+  React.useEffect(() => {
+    const request = requestGlobalKpiSummary({ force: true, silent: false });
+    const intervalId = window.setInterval(() => {
+      requestGlobalKpiSummary({ force: false, silent: true });
+    }, 120000);
 
     return () => {
-      cancelled = true;
+      request?.cancel?.();
+      window.clearInterval(intervalId);
     };
-  }, []);
+  }, [requestGlobalKpiSummary]);
+
+  React.useEffect(() => {
+    if (activeMenu !== 'panel') return;
+    const request = requestGlobalKpiSummary({ force: true, silent: false });
+    return () => {
+      request?.cancel?.();
+    };
+  }, [activeMenu, requestGlobalKpiSummary]);
 
   const clearAdvancedOverlays = React.useCallback(() => {
     advancedGroupRef.current?.clearLayers();
@@ -2244,6 +2279,7 @@ function MapView({ mode = 'desktop' }) {
     setAnalysisResult(null);
     setPopulationCircle(null);
     setPopulationResult(null);
+    setHotspotAnalysisSummary(null);
   }, []);
 
   const activateOperationalTool = React.useCallback(
@@ -2713,11 +2749,13 @@ function MapView({ mode = 'desktop' }) {
         return layer.visible !== false && hasFeatures;
       })
       .forEach((layer) => {
-        // Las capas de transporte (Cablebús, Tren Ligero, Trolebús) tienen geometría
-        // de línea en la base de datos, pero se renderizan como puntos (una parada/
-        // estación por vértice central). Los datos originales no se modifican.
-        const isTransport = isTransportLayer(layer.name);
-        const renderLayer = isTransport ? toPointLayer(layer) : layer;
+        if (isMovilidadLayer(layer)) {
+          const data = layer?.data || {};
+          const geometryTypes = Array.isArray(data.features)
+            ? data.features.map((f) => f?.geometry?.type)
+            : [];
+          console.log("FEATURES:", geometryTypes);
+        }
 
         const geoJsonLayer = createGeoJsonLayer({
           // Popup Leaflet deshabilitado: dejamos únicamente la tarjeta lateral.
@@ -2731,8 +2769,7 @@ function MapView({ mode = 'desktop' }) {
               activeTool === 'population' ||
               activeAnalysisMode !== 'idle'
             ),
-          layer: renderLayer,
-          forcePointStyle: isTransport,
+          layer,
           onSelectFeature: (payload) => {
             actionsRef.current.focusLayer(payload.layerId);
             actionsRef.current.setSelectedFeature(payload);
@@ -3758,23 +3795,48 @@ function MapView({ mode = 'desktop' }) {
     const redrawHotspot = () => {
       hotspotGroup.clearLayers();
 
-      if (activeTool !== 'hotspot' || !hotspotLayer) return;
+      if (activeTool !== 'hotspot' || !hotspotLayer) {
+        setHotspotAnalysisSummary(null);
+        return;
+      }
 
-      const bins = buildHotspotBins({
+      const bufferCenter = hotspotBufferKm > 0 ? map.getCenter() : null;
+      const hotspotAnalysis = buildHotspotBins({
         cellSizePx: 72,
         layers: hotspotLayers,
         map,
+        mode: hotspotMode,
+        bufferCenter,
+        bufferRadiusKm: hotspotBufferKm,
       });
+      const bins = Array.isArray(hotspotAnalysis?.bins)
+        ? hotspotAnalysis.bins
+        : [];
+      const summary = hotspotAnalysis?.summary || null;
+      setHotspotAnalysisSummary(summary);
+
+      if (summary?.bufferApplied && bufferCenter) {
+        L.circle(bufferCenter, {
+          radius: hotspotBufferKm * METERS_PER_KILOMETER,
+          color: '#0f766e',
+          weight: 1.8,
+          opacity: 0.9,
+          fillColor: '#0f766e',
+          fillOpacity: 0.06,
+          dashArray: '5 4',
+        }).addTo(hotspotGroup);
+      }
 
       if (!bins.length) return;
-      const maxCount = bins[0].count;
+      const maxMetric = Number(bins[0]?.metric || 0);
 
       bins.slice(0, 180).forEach((bin) => {
-        const color = getHotspotColor(bin.count, maxCount);
-        const intensity = maxCount > 0 ? bin.count / maxCount : 0;
+        const metricValue = Number(bin.metric || 0);
+        const color = getHotspotColor(metricValue, maxMetric);
+        const intensity = maxMetric > 0 ? metricValue / maxMetric : 0;
 
         const marker = L.circleMarker(bin.center, {
-          radius: Math.max(16, Math.min(44, 14 + Math.sqrt(bin.count) * 5)),
+          radius: Math.max(14, Math.min(42, 14 + intensity * 28)),
           color,
           weight: 1.4,
           fillColor: color,
@@ -3782,7 +3844,11 @@ function MapView({ mode = 'desktop' }) {
           opacity: Math.min(1, 0.74 + intensity * 0.26),
         }).addTo(hotspotGroup);
 
-        marker.bindTooltip(`${bin.count} obra(s)`, {
+        const tooltip =
+          hotspotMode === 'spend'
+            ? `${bin.count} obra(s) · ${formatCurrencyValue(bin.weight)}`
+            : `${bin.count} obra(s)`;
+        marker.bindTooltip(tooltip, {
           permanent: false,
           direction: 'top',
           className: 'measure-label',
@@ -3797,7 +3863,14 @@ function MapView({ mode = 'desktop' }) {
       map.off('moveend zoomend', redrawHotspot);
       hotspotGroup.clearLayers();
     };
-  }, [activeTool, hotspotLayer, hotspotLayers, mapReadyVersion]);
+  }, [
+    activeTool,
+    hotspotBufferKm,
+    hotspotLayer,
+    hotspotLayers,
+    hotspotMode,
+    mapReadyVersion,
+  ]);
 
   React.useEffect(() => {
     measurementGroupRef.current?.clearLayers();
@@ -3805,6 +3878,136 @@ function MapView({ mode = 'desktop' }) {
     setActiveTool(null);
     setActiveMenu(null);
   }, [clearAdvancedOverlays, clearSignal, mapReadyVersion]);
+
+  const operationalVisibleLayers = React.useMemo(
+    () =>
+      mapLayersForRender.filter(
+        (layer) =>
+          layer?.visible &&
+          isOperationalWorkLayer(layer) &&
+          Array.isArray(layer?.data?.features) &&
+          layer.data.features.length > 0
+      ),
+    [mapLayersForRender]
+  );
+  const analysisStatusSummary = React.useMemo(() => {
+    const workStatusMap = new Map();
+    const summary = {
+      total: 0,
+      entregadas: 0,
+      terminadas: 0,
+      enProceso: 0,
+      sinIniciar: 0,
+      completionPct: 0,
+      avgProgress: 0,
+      riskCount: 0,
+    };
+
+    operationalVisibleLayers.forEach((layer) => {
+      const movilidadLayer = isMovilidadLayer(layer);
+      const features = layer?.data?.features || [];
+      features.forEach((feature, featureIndex) => {
+        const geometryType = feature?.geometry?.type;
+        if (movilidadLayer) {
+          if (!shouldCountFeature(feature, layer)) return;
+          if (!geometryType || isPointLikeGeometry(geometryType)) return;
+        } else if (!isPointLikeGeometry(geometryType)) {
+          return;
+        }
+        const statusKey = resolveFeatureStatus(feature?.properties || {});
+        if (!statusKey) return;
+        const workKey =
+          buildFeatureWorkKey(feature) || `${layer.id || 'layer'}:${featureIndex}`;
+        const previousStatus = workStatusMap.get(workKey);
+        const previousPriority = STATUS_PRIORITY[previousStatus] || 0;
+        const currentPriority = STATUS_PRIORITY[statusKey] || 0;
+        if (!previousStatus || currentPriority > previousPriority) {
+          workStatusMap.set(workKey, statusKey);
+        }
+      });
+    });
+
+    summary.total = workStatusMap.size;
+    workStatusMap.forEach((statusKey) => {
+      if (statusKey === 'entregado') summary.entregadas += 1;
+      else if (statusKey === 'terminado') summary.terminadas += 1;
+      else if (statusKey === 'proceso') summary.enProceso += 1;
+      else if (statusKey === 'sin iniciar') summary.sinIniciar += 1;
+    });
+    summary.completionPct =
+      summary.total > 0
+        ? Math.round(((summary.entregadas + summary.terminadas) / summary.total) * 100)
+        : 0;
+
+    const progressValues = operationalVisibleLayers
+      .map((layer) => Number(layerMetricsById.get(layer.id)?.averageProgress))
+      .filter((value) => Number.isFinite(value));
+    summary.avgProgress = progressValues.length
+      ? Math.round(
+          progressValues.reduce((total, value) => total + value, 0) /
+            progressValues.length
+        )
+      : 0;
+    summary.riskCount = operationalVisibleLayers.reduce(
+      (total, layer) => total + Number(layerMetricsById.get(layer.id)?.riskCount || 0),
+      0
+    );
+
+    return summary;
+  }, [layerMetricsById, operationalVisibleLayers]);
+  const analysisCoverageSummary = React.useMemo(() => {
+    const geometryBuckets = {
+      point: 0,
+      line: 0,
+      polygon: 0,
+      other: 0,
+    };
+    const alcaldiaCounter = new Map();
+    const dgCounter = new Map();
+    let totalFeatures = 0;
+
+    operationalVisibleLayers.forEach((layer) => {
+      const layerFeatures = layer?.data?.features || [];
+      const layerFeatureCount = layerFeatures.length;
+      totalFeatures += layerFeatureCount;
+
+      const dgName = String(layer?.dg || 'Sin DG').trim() || 'Sin DG';
+      const dgState = dgCounter.get(dgName) || { layers: 0, features: 0 };
+      dgState.layers += 1;
+      dgState.features += layerFeatureCount;
+      dgCounter.set(dgName, dgState);
+
+      layerFeatures.forEach((feature) => {
+        const bucket = resolveGeometryBucket(feature?.geometry?.type || '');
+        geometryBuckets[bucket] += 1;
+
+        const alcaldia = resolveFeatureAlcaldia(feature?.properties || {});
+        alcaldiaCounter.set(alcaldia, (alcaldiaCounter.get(alcaldia) || 0) + 1);
+      });
+    });
+
+    const toPercent = (value) =>
+      totalFeatures > 0 ? Math.round((Number(value || 0) / totalFeatures) * 100) : 0;
+
+    return {
+      totalFeatures,
+      totalLayers: operationalVisibleLayers.length,
+      geometryBuckets,
+      topAlcaldias: Array.from(alcaldiaCounter.entries())
+        .map(([name, count]) => ({ name, count, pct: toPercent(count) }))
+        .sort((left, right) => right.count - left.count)
+        .slice(0, 6),
+      topDgs: Array.from(dgCounter.entries())
+        .map(([name, stats]) => ({
+          name,
+          layers: Number(stats.layers || 0),
+          features: Number(stats.features || 0),
+          pct: toPercent(stats.features),
+        }))
+        .sort((left, right) => right.features - left.features)
+        .slice(0, 6),
+    };
+  }, [operationalVisibleLayers]);
 
   const toolDetailPanel = React.useMemo(() => {
     if (!showAdvancedTools || !activeTool) return null;
@@ -4447,9 +4650,32 @@ function MapView({ mode = 'desktop' }) {
     }
 
     if (activeTool === 'analysis') {
+      const geometryRows = [
+        {
+          id: 'point',
+          label: 'Puntos',
+          count: analysisCoverageSummary.geometryBuckets.point,
+        },
+        {
+          id: 'line',
+          label: 'Líneas',
+          count: analysisCoverageSummary.geometryBuckets.line,
+        },
+        {
+          id: 'polygon',
+          label: 'Polígonos',
+          count: analysisCoverageSummary.geometryBuckets.polygon,
+        },
+        {
+          id: 'other',
+          label: 'Otros',
+          count: analysisCoverageSummary.geometryBuckets.other,
+        },
+      ];
+
       return (
-        <div className="map-view__tools-detail">
-          <span className="map-view__tools-title">Análisis poblacional</span>
+        <div className="map-view__tools-detail map-view__tools-detail--analysis">
+          <span className="map-view__tools-title">Análisis de información</span>
           <div className="map-view__tools-row">
             <AdvancedToolChip
               active={analysisMode === 'population'}
@@ -4469,13 +4695,29 @@ function MapView({ mode = 'desktop' }) {
             >
               Proximidad
             </AdvancedToolChip>
+            <AdvancedToolChip
+              active={analysisMode === 'status'}
+              onClick={() => setAnalysisMode('status')}
+            >
+              Estado
+            </AdvancedToolChip>
+            <AdvancedToolChip
+              active={analysisMode === 'coverage'}
+              onClick={() => setAnalysisMode('coverage')}
+            >
+              Cobertura
+            </AdvancedToolChip>
           </div>
           <p>
             {analysisMode === 'population'
               ? 'Haz clic en el mapa para iniciar y ajusta el radio para actualizar la suma automáticamente.'
               : analysisMode === 'buffer'
                 ? 'Haz clic en el mapa para ejecutar buffer avanzado.'
-                : 'Haz clic en el mapa para evaluar cobertura de servicios esenciales en 5, 15 y 20 minutos.'}
+                : analysisMode === 'proximity'
+                  ? 'Haz clic en el mapa para evaluar cobertura de servicios esenciales en 5, 15 y 20 minutos.'
+                  : analysisMode === 'status'
+                    ? 'Resumen ejecutivo del estado de obra para las capas visibles.'
+                    : 'Cobertura territorial y distribución geométrica de la vista actual.'}
           </p>
           <div className="map-view__tools-row">
             {analysisMode === 'population'
@@ -4583,20 +4825,235 @@ function MapView({ mode = 'desktop' }) {
               </strong>
             </>
           ) : null}
+          {analysisMode === 'status' ? (
+            <>
+              <div className="map-view__analysis-grid">
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
+                  <span>Total obras</span>
+                  <strong>
+                    {Number(analysisStatusSummary.total || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--ok">
+                  <span>Obras inauguradas</span>
+                  <strong>
+                    {Number(analysisStatusSummary.entregadas || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--ok">
+                  <span>Obras terminadas</span>
+                  <strong>
+                    {Number(analysisStatusSummary.terminadas || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--warn">
+                  <span>Obras en proceso</span>
+                  <strong>
+                    {Number(analysisStatusSummary.enProceso || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--risk">
+                  <span>Obras sin iniciar</span>
+                  <strong>
+                    {Number(analysisStatusSummary.sinIniciar || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
+                  <span>Cierre (inaugurada + terminada)</span>
+                  <strong>{Number(analysisStatusSummary.completionPct || 0)}%</strong>
+                </article>
+              </div>
+              <div className="map-view__analysis-row">
+                <span className="map-view__analysis-pill">
+                  Riesgos detectados: {Number(analysisStatusSummary.riskCount || 0).toLocaleString('es-MX')}
+                </span>
+                <span className="map-view__analysis-pill">
+                  Avance promedio: {Number(analysisStatusSummary.avgProgress || 0)}%
+                </span>
+              </div>
+            </>
+          ) : null}
+          {analysisMode === 'coverage' ? (
+            <>
+              <div className="map-view__analysis-grid">
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
+                  <span>Capas visibles</span>
+                  <strong>
+                    {Number(analysisCoverageSummary.totalLayers || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+                <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
+                  <span>Elementos visibles</span>
+                  <strong>
+                    {Number(analysisCoverageSummary.totalFeatures || 0).toLocaleString('es-MX')}
+                  </strong>
+                </article>
+              </div>
+              <div className="map-view__analysis-row">
+                {geometryRows.map((row) => (
+                  <span className="map-view__analysis-pill" key={row.id}>
+                    {row.label}: {Number(row.count || 0).toLocaleString('es-MX')}
+                  </span>
+                ))}
+              </div>
+              <div className="map-view__analysis-list">
+                <strong>Top alcaldías (vista actual)</strong>
+                {analysisCoverageSummary.topAlcaldias.length ? (
+                  analysisCoverageSummary.topAlcaldias.map((row) => (
+                    <div className="map-view__analysis-list-item" key={`alc-${row.name}`}>
+                      <span>{row.name}</span>
+                      <strong>
+                        {Number(row.count || 0).toLocaleString('es-MX')} ({row.pct}%)
+                      </strong>
+                    </div>
+                  ))
+                ) : (
+                  <p className="map-view__analysis-empty">Sin datos de alcaldía en la vista.</p>
+                )}
+              </div>
+              <div className="map-view__analysis-list">
+                <strong>Top DG por volumen</strong>
+                {analysisCoverageSummary.topDgs.length ? (
+                  analysisCoverageSummary.topDgs.map((row) => (
+                    <div className="map-view__analysis-list-item" key={`dg-${row.name}`}>
+                      <span>{row.name}</span>
+                      <strong>
+                        {Number(row.features || 0).toLocaleString('es-MX')} ({row.layers}{' '}
+                        capas)
+                      </strong>
+                    </div>
+                  ))
+                ) : (
+                  <p className="map-view__analysis-empty">Sin capas visibles para este análisis.</p>
+                )}
+              </div>
+            </>
+          ) : null}
         </div>
       );
     }
 
     if (activeTool === 'hotspot') {
+      const summary = hotspotAnalysisSummary || {
+        totalFeatures: 0,
+        totalWeight: 0,
+        topAlcaldias: [],
+      };
+      const topAlcaldia = summary.topAlcaldias?.[0] || null;
+      const hotspotMetricLabel =
+        hotspotMode === 'spend' ? 'Índice de gasto' : 'Obras';
+      const topAlcaldiaMetric =
+        hotspotMode === 'spend'
+          ? formatCurrencyValue(topAlcaldia?.weight || 0)
+          : Number(topAlcaldia?.count || 0).toLocaleString('es-MX');
+
       return (
         <div className="map-view__tools-detail">
-          <span className="map-view__tools-title">Concentración de obra</span>
-          <p>Mapa de concentración de obras activo sobre las capas visibles.</p>
+          <span className="map-view__tools-title">Hotspot de obras</span>
+          <p>
+            Buffer y concentración conectados a las capas de base de datos ya
+            cargadas en mapa.
+          </p>
           <strong>
             {hotspotLayers.length
               ? `${hotspotLayers.length} capa(s) en análisis · ${hotspotLayer?.name || 'Capa prioritaria'}`
               : 'Selecciona o activa una capa con datos'}
           </strong>
+          <div className="map-view__tools-row">
+            <AdvancedToolChip
+              active={hotspotMode === 'count'}
+              onClick={() => setHotspotMode('count')}
+            >
+              Por obras
+            </AdvancedToolChip>
+            <AdvancedToolChip
+              active={hotspotMode === 'spend'}
+              onClick={() => setHotspotMode('spend')}
+            >
+              Por gasto
+            </AdvancedToolChip>
+          </div>
+          <div className="map-view__range-control">
+            <button
+              className="map-view__range-btn"
+              onClick={() => adjustHotspotBuffer(-0.5)}
+              type="button"
+            >
+              -0.5
+            </button>
+            <input
+              max={HOTSPOT_BUFFER_MAX_KM}
+              min="0"
+              onChange={(event) =>
+                setHotspotBufferKm(
+                  Number(
+                    clampNumber(
+                      Number(event.target.value),
+                      0,
+                      HOTSPOT_BUFFER_MAX_KM
+                    ).toFixed(1)
+                  )
+                )
+              }
+              step="0.5"
+              type="range"
+              value={hotspotBufferKm}
+            />
+            <button
+              className="map-view__range-btn"
+              onClick={() => adjustHotspotBuffer(0.5)}
+              type="button"
+            >
+              +0.5
+            </button>
+          </div>
+          <strong>
+            Buffer del hotspot:{' '}
+            {hotspotBufferKm > 0 ? `${hotspotBufferKm} km` : 'sin buffer'}
+          </strong>
+          <div className="map-view__analysis-grid">
+            <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
+              <span>Obras analizadas</span>
+              <strong>
+                {Number(summary.totalFeatures || 0).toLocaleString('es-MX')}
+              </strong>
+            </article>
+            <article className="map-view__analysis-kpi map-view__analysis-kpi--warn">
+              <span>{hotspotMetricLabel}</span>
+              <strong>
+                {hotspotMode === 'spend'
+                  ? formatCurrencyValue(summary.totalWeight || 0)
+                  : Number(summary.totalFeatures || 0).toLocaleString('es-MX')}
+              </strong>
+            </article>
+            <article className="map-view__analysis-kpi map-view__analysis-kpi--ok">
+              <span>Alcaldía líder</span>
+              <strong>{topAlcaldia?.name || 'Sin dato'}</strong>
+            </article>
+            <article className="map-view__analysis-kpi map-view__analysis-kpi--risk">
+              <span>Valor líder</span>
+              <strong>{topAlcaldia ? topAlcaldiaMetric : '—'}</strong>
+            </article>
+          </div>
+          <div className="map-view__analysis-list">
+            <strong>Top alcaldías del hotspot</strong>
+            {summary.topAlcaldias?.length ? (
+              summary.topAlcaldias.slice(0, 5).map((row) => (
+                <div className="map-view__analysis-list-item" key={`hotspot-alc-${row.name}`}>
+                  <span>{row.name}</span>
+                  <strong>
+                    {hotspotMode === 'spend'
+                      ? formatCurrencyValue(row.weight || 0)
+                      : `${Number(row.count || 0).toLocaleString('es-MX')} obras`}
+                  </strong>
+                </div>
+              ))
+            ) : (
+              <p className="map-view__analysis-empty">
+                Sin datos para construir hotspot en la vista actual.
+              </p>
+            )}
+          </div>
         </div>
       );
     }
@@ -4606,8 +5063,11 @@ function MapView({ mode = 'desktop' }) {
     activeTool,
     activeBaseMap.id,
     actions,
+    analysisCoverageSummary,
     analysisMode,
+    analysisStatusSummary,
     adjustBufferRadius,
+    adjustHotspotBuffer,
     adjustPopulationRadius,
     adjustProximityScale,
     bufferDissolve,
@@ -4623,8 +5083,11 @@ function MapView({ mode = 'desktop' }) {
     bufferUseMultipleRings,
     bufferUseVariableDistance,
     drawToolMode,
+    hotspotAnalysisSummary,
+    hotspotBufferKm,
     hotspotLayer,
     hotspotLayers,
+    hotspotMode,
     measureToolMode,
     orderedBaseMaps,
     populationRadiusKm,
@@ -4662,7 +5125,11 @@ function MapView({ mode = 'desktop' }) {
             ? `Buffer ${bufferRadiusKm} km`
             : analysisMode === 'population'
               ? `Población ${populationRadiusKm} km`
-              : `Proximidad 5/15/20 min (${proximityRadiusKm} km)`
+              : analysisMode === 'proximity'
+                ? `Proximidad 5/15/20 min (${proximityRadiusKm} km)`
+                : analysisMode === 'status'
+                  ? 'Estado de obras'
+                  : 'Cobertura territorial'
           : activeTool === 'hotspot'
             ? 'Concentración de obra'
             : activeTool === 'draw'
@@ -4710,47 +5177,6 @@ function MapView({ mode = 'desktop' }) {
     });
     return Array.from(tableNames);
   }, [layers]);
-  const statusCountsLocal = React.useMemo(() => {
-    const workStatusMap = new Map();
-    const counts = {
-      total_obras: 0,
-      entregadas: 0,
-      terminadas: 0,
-      en_proceso: 0,
-      sin_iniciar: 0,
-    };
-
-    layers.forEach((layer) => {
-      if (!isOperationalWorkLayer(layer)) return;
-      const features = layer?.data?.features || [];
-      if (!features.length) return;
-
-      features.forEach((feature, featureIndex) => {
-        if (!isPointLikeGeometry(feature?.geometry?.type)) return;
-        const statusKey = resolveFeatureStatus(feature?.properties || {});
-        if (!statusKey) return;
-        const workKey =
-          buildFeatureWorkKey(feature) || `${layer.id || 'layer'}:${featureIndex}`;
-        const previousStatus = workStatusMap.get(workKey);
-        const previousPriority = STATUS_PRIORITY[previousStatus] || 0;
-        const currentPriority = STATUS_PRIORITY[statusKey] || 0;
-        if (!previousStatus || currentPriority > previousPriority) {
-          workStatusMap.set(workKey, statusKey);
-        }
-      });
-    });
-
-    counts.total_obras = workStatusMap.size;
-    workStatusMap.forEach((statusKey) => {
-      if (statusKey === 'entregado') counts.entregadas += 1;
-      else if (statusKey === 'terminado') counts.terminadas += 1;
-      else if (statusKey === 'proceso') counts.en_proceso += 1;
-      else if (statusKey === 'sin iniciar') counts.sin_iniciar += 1;
-    });
-
-    return counts;
-  }, [layers]);
-
   const panelKpiCounts = React.useMemo(() => {
     if (USE_STATIC_EXECUTIVE_KPIS) {
       return { ...STATIC_EXECUTIVE_KPIS };
@@ -4759,11 +5185,11 @@ function MapView({ mode = 'desktop' }) {
     const totals = globalKpiSummary?.totals;
     if (totals) {
       return {
-        totalObras: Number(totals.total_obras || 0),
-        entregadas: Number(totals.entregadas || 0),
-        terminadas: Number(totals.terminadas || 0),
-        enProceso: Number(totals.en_proceso || 0),
-        sinIniciar: Number(totals.sin_iniciar || 0),
+        totalObras: parseKpiCount(totals.total_obras),
+        entregadas: parseKpiCount(totals.entregadas),
+        terminadas: parseKpiCount(totals.terminadas),
+        enProceso: parseKpiCount(totals.en_proceso),
+        sinIniciar: parseKpiCount(totals.sin_iniciar),
       };
     }
 
@@ -4785,11 +5211,11 @@ function MapView({ mode = 'desktop' }) {
       if (filteredRows.length) {
         const aggregated = filteredRows.reduce(
           (accumulator, row) => {
-            accumulator.total_obras += Number(row?.total || 0);
-            accumulator.entregadas += Number(row?.entregado || 0);
-            accumulator.terminadas += Number(row?.terminado || 0);
-            accumulator.en_proceso += Number(row?.proceso || 0);
-            accumulator.sin_iniciar += Number(row?.sin_iniciar || 0);
+            accumulator.total_obras += parseKpiCount(row?.total);
+            accumulator.entregadas += parseKpiCount(row?.entregado);
+            accumulator.terminadas += parseKpiCount(row?.terminado);
+            accumulator.en_proceso += parseKpiCount(row?.proceso);
+            accumulator.sin_iniciar += parseKpiCount(row?.sin_iniciar);
             return accumulator;
           },
           {
@@ -4801,23 +5227,20 @@ function MapView({ mode = 'desktop' }) {
           }
         );
         return {
-          totalObras: Number(aggregated.total_obras || 0),
-          entregadas: Number(aggregated.entregadas || 0),
-          terminadas: Number(aggregated.terminadas || 0),
-          enProceso: Number(aggregated.en_proceso || 0),
-          sinIniciar: Number(aggregated.sin_iniciar || 0),
+          totalObras: parseKpiCount(aggregated.total_obras),
+          entregadas: parseKpiCount(aggregated.entregadas),
+          terminadas: parseKpiCount(aggregated.terminadas),
+          enProceso: parseKpiCount(aggregated.en_proceso),
+          sinIniciar: parseKpiCount(aggregated.sin_iniciar),
         };
       }
     }
 
+    // Evita mostrar subtotales parciales del cliente cuando no hay KPI global.
     return {
-      totalObras: Number(statusCountsLocal.total_obras || 0),
-      entregadas: Number(statusCountsLocal.entregadas || 0),
-      terminadas: Number(statusCountsLocal.terminadas || 0),
-      enProceso: Number(statusCountsLocal.en_proceso || 0),
-      sinIniciar: Number(statusCountsLocal.sin_iniciar || 0),
+      ...STATIC_EXECUTIVE_KPIS,
     };
-  }, [globalKpiSummary, operationalDatabaseTableNames, statusCountsLocal]);
+  }, [globalKpiSummary, operationalDatabaseTableNames]);
 
   const selectedStatusFeatureCount = React.useMemo(() => {
     if (USE_STATIC_EXECUTIVE_KPIS) {
@@ -4829,12 +5252,13 @@ function MapView({ mode = 'desktop' }) {
       return Number(STATIC_EXECUTIVE_KPIS.totalObras || 0);
     }
 
-    if (!selectedKpiStatus) return Number(filteredFeatureCount || 0);
-    return mapLayersForRender.reduce(
-      (total, layer) => total + Number(layer?.data?.features?.length || 0),
-      0
-    );
-  }, [filteredFeatureCount, mapLayersForRender, selectedKpiStatus]);
+    if (!selectedKpiStatus) return Number(panelKpiCounts.totalObras || 0);
+    if (selectedKpiStatus === 'entregado') return Number(panelKpiCounts.entregadas || 0);
+    if (selectedKpiStatus === 'terminado') return Number(panelKpiCounts.terminadas || 0);
+    if (selectedKpiStatus === 'proceso') return Number(panelKpiCounts.enProceso || 0);
+    if (selectedKpiStatus === 'sin iniciar') return Number(panelKpiCounts.sinIniciar || 0);
+    return Number(panelKpiCounts.totalObras || 0);
+  }, [panelKpiCounts, selectedKpiStatus]);
   const displayedRecordCount = USE_STATIC_EXECUTIVE_KPIS
     ? Number(STATIC_EXECUTIVE_KPIS.totalObras || 0)
     : Number(filteredFeatureCount || 0);
@@ -4876,7 +5300,7 @@ function MapView({ mode = 'desktop' }) {
     },
     panel: {
       title: 'Panel',
-      subtitle: 'Indicadores ejecutivos de la vista actual',
+      subtitle: 'Indicadores ejecutivos globales de la base de datos',
     },
     tools: {
       title: 'Herramientas',
@@ -5011,7 +5435,7 @@ function MapView({ mode = 'desktop' }) {
                 : 'Filtro activo: todos los estatus'}
             </span>
             <strong>
-              {Number(selectedStatusFeatureCount || 0).toLocaleString('es-MX')} puntos
+              {Number(selectedStatusFeatureCount || 0).toLocaleString('es-MX')} obras
             </strong>
           </div>
           {selectedKpiStatus && Number(selectedStatusFeatureCount || 0) === 0 ? (
@@ -5120,6 +5544,17 @@ function MapView({ mode = 'desktop' }) {
           <h4 className="map-tools-section__label">Análisis</h4>
           <div className="map-tools-grid map-tools-grid--analysis">
             <MenuToolCard
+              active={activeTool === 'analysis'}
+              desc="Estado, cobertura, buffer, proximidad y población"
+              icon={<AnalysisToolIcon />}
+              onClick={() =>
+                activateOperationalTool('analysis', {
+                  nextAnalysisMode: 'status',
+                })
+              }
+              title="Análisis info"
+            />
+            <MenuToolCard
               active={activeTool === 'population'}
               desc={`Radio dinámico hasta ${POPULATION_RADIUS_MAX_KM} km`}
               icon={<PopulationToolIcon />}
@@ -5136,7 +5571,7 @@ function MapView({ mode = 'desktop' }) {
             <MenuToolCard
               active={activeTool === 'hotspot'}
               className="map-tool-card--hotspot"
-              desc="Concentración por cantidad de obras"
+              desc="Concentración por obras o índice de gasto"
               icon={<ToolIcon alt="Concentración de obra" src={`${TOOL_ICON_BASE}/hotspot.svg`} />}
               onClick={() => activateOperationalTool('hotspot')}
               title="Concentración de obra"

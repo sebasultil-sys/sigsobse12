@@ -1,3 +1,4 @@
+import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
 
 const SEARCH_LOGO_SRC = process.env.PUBLIC_URL + '/assets/img/nuevologoSinfondo.png';
@@ -29,6 +30,28 @@ function FiltersPanel() {
   } = useGISWorkspace();
 
   const selectedProperties = selectedFeature?.properties || null;
+  const avanceRaw = selectedProperties?.avance ?? selectedProperties?.AVANCE;
+  const avance = Math.max(0, Math.min(100, Number(avanceRaw) || 0));
+
+  const getColor = (value) => {
+    if (value <= 30) return '#e53935';
+    if (value <= 70) return '#fb8c00';
+    if (value < 100) return '#fdd835';
+    return '#43a047';
+  };
+
+  const inicioContrato =
+    selectedProperties?.inicio_contrato ||
+    selectedProperties?.fecha_inicio ||
+    'N/A';
+  const terminoContrato =
+    selectedProperties?.termino_contrato ||
+    selectedProperties?.fecha_fin ||
+    'N/A';
+  const judResponsable =
+    selectedProperties?.jud_responsable ||
+    selectedProperties?.supervisor ||
+    'N/A';
 
   return (
     <section className="filters-panel">
@@ -124,28 +147,65 @@ function FiltersPanel() {
             No hay una obra seleccionada todavía.
           </div>
         ) : (
-          <table className="feature-sheet">
-            <tbody>
-              {[
-                ['Obra', selectedProperties.OBRA],
-                ['Programa', selectedProperties.PROGRAMA],
-                ['DG', selectedProperties.DG],
-                ['Alcaldía', selectedProperties.ALCALDIA],
-                ['Frente', selectedProperties.FRENTE],
-              ]
-                .filter(([, value]) => value)
-                .map(([label, value]) => (
-                  <tr key={label}>
-                    <th>{label}</th>
-                    <td>{String(value)}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
+          <>
+            <table className="feature-sheet">
+              <tbody>
+                {[
+                  ['Obra', selectedProperties.OBRA],
+                  ['Programa', selectedProperties.PROGRAMA],
+                  ['DG', selectedProperties.DG],
+                  ['Alcaldía', selectedProperties.ALCALDIA],
+                  ['Frente', selectedProperties.FRENTE],
+                ]
+                  .filter(([, value]) => value)
+                  .map(([label, value]) => (
+                    <tr key={label}>
+                      <th>{label}</th>
+                      <td>{String(value)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+
+            <div className="contract-info">
+              <div className="info-row">
+                <span>Inicio de contrato</span>
+                <span>{inicioContrato}</span>
+              </div>
+              <div className="info-row">
+                <span>Término de contrato</span>
+                <span>{terminoContrato}</span>
+              </div>
+              <div className="info-row">
+                <span>JUD Responsable</span>
+                <span>{judResponsable}</span>
+              </div>
+            </div>
+
+            <div className="progress-section">
+              <div className="progress-label">
+                <span>Avance</span>
+                <span>{avance}%</span>
+              </div>
+
+              <div className="progress-bar">
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${avance}%`,
+                    backgroundColor: getColor(avance),
+                    height: '8px',
+                    borderRadius: '4px',
+                    transition: 'width 0.3s ease',
+                  }}
+                />
+              </div>
+            </div>
+          </>
         )}
       </div>
     </section>
   );
 }
 
-export default FiltersPanel;
+export default React.memo(FiltersPanel);

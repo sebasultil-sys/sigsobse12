@@ -1,6 +1,5 @@
 Options -MultiViews
 RewriteEngine On
-RewriteBase /
 
 # Servir index.html directamente si se pide
 RewriteRule ^index\.html$ - [L]
@@ -10,7 +9,7 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 
 # Fallback SPA — todas las rutas apuntan a index.html (React Router)
-RewriteRule . /index.html [L]
+RewriteRule . index.html [L]
 
 # Compresión GZIP para assets estáticos
 <IfModule mod_deflate.c>
@@ -20,6 +19,7 @@ RewriteRule . /index.html [L]
 # Cache de assets estáticos (JS/CSS generados por React con hash en el nombre)
 <IfModule mod_expires.c>
   ExpiresActive On
+  ExpiresByType text/html "access plus 0 seconds"
   ExpiresByType application/javascript "access plus 1 year"
   ExpiresByType text/css "access plus 1 year"
   ExpiresByType image/png "access plus 1 month"
@@ -29,6 +29,13 @@ RewriteRule . /index.html [L]
 
 # Headers de seguridad básicos
 <IfModule mod_headers.c>
+  # Evita que Hostinger/navegador sirvan una SPA vieja por cache
+  <FilesMatch "^(index\.html|runtime-config\.js|service-worker\.js|asset-manifest\.json|manifest\.json)$">
+    Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </FilesMatch>
+
   Header always set X-Content-Type-Options "nosniff"
   Header always set X-Frame-Options "SAMEORIGIN"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"

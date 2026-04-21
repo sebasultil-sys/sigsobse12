@@ -1,68 +1,69 @@
-import React from 'react';
-import { useGISWorkspace } from '../../app/GISWorkspaceContext';
-import FiltersPanel from '../filters/FiltersPanel';
-import LayerStyleEditor from './LayerStyleEditor';
+import React from "react";
+import { useGISWorkspace } from "../../app/GISWorkspaceContext";
+import FiltersPanel from "../filters/FiltersPanel";
+import LayerStyleEditor from "./LayerStyleEditor";
 import {
-  getLayerDgs,
   getLayerGroupKey,
   getLayerGroupLabel,
   orderLayerGroupEntries,
-} from './layerGroups';
-import { formatLayerCount, getLayerStatus } from './layerStatus';
-import { getLayerIcon } from '../../config/layerIcons';
+} from "./layerGroups";
+import { formatLayerCount, getLayerStatus } from "./layerStatus";
+import { getLayerIcon } from "../../config/layerIcons";
 
 const GEOJSON_GEOMETRY_TYPES = new Set([
-  'Point',
-  'MultiPoint',
-  'LineString',
-  'MultiLineString',
-  'Polygon',
-  'MultiPolygon',
-  'GeometryCollection',
+  "Point",
+  "MultiPoint",
+  "LineString",
+  "MultiLineString",
+  "Polygon",
+  "MultiPolygon",
+  "GeometryCollection",
 ]);
 
 function getGeometryClass(geometryType) {
-  if (geometryType === 'Point' || geometryType === 'MultiPoint') {
-    return 'is-point';
+  if (geometryType === "Point" || geometryType === "MultiPoint") {
+    return "is-point";
   }
 
-  if (geometryType === 'LineString' || geometryType === 'MultiLineString') {
-    return 'is-line';
+  if (geometryType === "LineString" || geometryType === "MultiLineString") {
+    return "is-line";
   }
 
-  return 'is-polygon';
+  return "is-polygon";
 }
 
 function buildFeatureCollectionFromGeoJson(payload) {
-  if (!payload || typeof payload !== 'object') {
-    throw new Error('El archivo no contiene un GeoJSON válido.');
+  if (!payload || typeof payload !== "object") {
+    throw new Error("El archivo no contiene un GeoJSON válido.");
   }
 
-  if (payload.type === 'FeatureCollection') {
+  if (payload.type === "FeatureCollection") {
     if (!Array.isArray(payload.features)) {
-      throw new Error('El FeatureCollection no contiene un arreglo de features.');
+      throw new Error(
+        "El FeatureCollection no contiene un arreglo de features.",
+      );
     }
 
     if (!payload.features.length) {
-      throw new Error('El GeoJSON no contiene elementos para dibujar.');
+      throw new Error("El GeoJSON no contiene elementos para dibujar.");
     }
 
     return payload;
   }
 
-  if (payload.type === 'Feature') {
+  if (payload.type === "Feature") {
     return {
-      type: 'FeatureCollection',
+      type: "FeatureCollection",
       features: [payload],
     };
   }
 
   if (GEOJSON_GEOMETRY_TYPES.has(payload.type)) {
     return {
-      type: 'FeatureCollection',
+      type: "FeatureCollection",
       features: [
         {
-          type: 'Feature',
+          type: "Feature",
           properties: {},
           geometry: payload,
         },
@@ -70,32 +71,42 @@ function buildFeatureCollectionFromGeoJson(payload) {
     };
   }
 
-  throw new Error('Solo se permiten archivos GeoJSON válidos.');
+  throw new Error("Solo se permiten archivos GeoJSON válidos.");
 }
 
 function buildMetricSummary(layer, metrics) {
   const loadedCount = layer.data?.features?.length || 0;
   const estimatedCount = Math.max(0, Number(layer.estimatedFeatureCount || 0));
   const isPendingDatabaseLayer =
-    layer.databaseLayer && layer.loadStatus !== 'loaded';
+    layer.databaseLayer && layer.loadStatus !== "loaded";
 
   return {
     progress: isPendingDatabaseLayer
-      ? 'Pendiente'
+      ? "Pendiente"
       : metrics.averageProgress != null
         ? `${metrics.averageProgress}% avance`
-        : 'Sin avance',
+        : "Sin avance",
     risk: isPendingDatabaseLayer
-      ? 'Sin evaluar'
+      ? "Sin evaluar"
       : metrics.riskCount > 0
-        ? `${metrics.riskCount} elemento${metrics.riskCount === 1 ? '' : 's'} en riesgo`
-        : 'Sin riesgo',
+        ? `${metrics.riskCount} elemento${metrics.riskCount === 1 ? "" : "s"} en riesgo`
+        : "Sin riesgo",
     total: isPendingDatabaseLayer
       ? estimatedCount > 0
         ? `${formatLayerCount(estimatedCount, true)} elementos estimados`
-        : 'Disponible para cargar'
-      : `${formatLayerCount(loadedCount)} elemento${loadedCount === 1 ? '' : 's'}`,
+        : "Disponible para cargar"
+      : `${formatLayerCount(loadedCount)} elemento${loadedCount === 1 ? "" : "s"}`,
   };
+}
+
+function getStatusIndicatorClass(tone, hasRisk) {
+  if (hasRisk) return " is-risk";
+  if (tone === "on") return " is-active";
+  if (tone === "loading") return " is-loading";
+  if (tone === "error") return " is-error";
+  if (tone === "waiting") return " is-waiting";
+  if (tone === "off" || tone === "empty") return " is-off";
+  return " is-pending";
 }
 
 function LayersPanel() {
@@ -134,11 +145,19 @@ function LayersPanel() {
     return counts;
   }, [filteredLayers]);
 
-  const hasHiddenLayers = visibleLayerCount < layers.length;
+  const manageableLayers = React.useMemo(
+    () =>
+      layers.filter(
+        (layer) =>
+          !layer.referenceLayer && !layer.isBaseMap && !layer.hideInLayersPanel
+      ),
+    [layers]
+  );
+  const hasHiddenLayers = visibleLayerCount < manageableLayers.length;
   const hasVisibleLayers = visibleLayerCount > 0;
   const uploadedLayers = React.useMemo(
     () => layers.filter((layer) => layer.uploaded),
-    [layers]
+    [layers],
   );
   const groupedLayerSearchResults = React.useMemo(() => {
     const groups = new Map();
@@ -146,18 +165,14 @@ function LayersPanel() {
     layerSearchResults
       // Ocultar capas de referencia del panel (ej. Límite CDMX).
       // Siguen visibles en el mapa — solo se esconden del listado de capas.
-      .filter((layer) => !layer.referenceLayer && !layer.isBaseMap)
+      .filter(
+        (layer) =>
+          !layer.referenceLayer && !layer.isBaseMap && !layer.hideInLayersPanel
+      )
       .forEach((layer) => {
-        // getLayerDgs lee todos los DGs únicos de los features de la capa.
-        // Si la capa mezcla DGs (p.ej. DGCOP y DGUV), aparece en ambos grupos.
-        getLayerDgs(layer).forEach((dg) => {
-          const key = getLayerGroupKey(dg);
-          if (!groups.has(key)) groups.set(key, []);
-          const bucket = groups.get(key);
-          if (!bucket.find((l) => l.id === layer.id)) {
-            bucket.push(layer);
-          }
-        });
+        const dg = getLayerGroupKey(layer.dg);
+        if (!groups.has(dg)) groups.set(dg, []);
+        groups.get(dg).push(layer);
       });
 
     return orderLayerGroupEntries(Array.from(groups.entries()));
@@ -167,7 +182,7 @@ function LayersPanel() {
     if (!openLayerId) return;
 
     const isStillVisible = layerSearchResults.some(
-      (layer) => layer.id === openLayerId
+      (layer) => layer.id === openLayerId,
     );
 
     if (!isStillVisible) {
@@ -176,7 +191,7 @@ function LayersPanel() {
   }, [layerSearchResults, openLayerId]);
 
   React.useEffect(() => {
-    if (sidebarTab === 'layers') {
+    if (sidebarTab === "layers") {
       setOpenLayerId(null);
       setOpenGroupId(null);
     }
@@ -186,7 +201,7 @@ function LayersPanel() {
     if (!openGroupId) return;
 
     const groupStillExists = groupedLayerSearchResults.some(
-      ([groupName]) => groupName === openGroupId
+      ([groupName]) => groupName === openGroupId,
     );
 
     if (!groupStillExists) {
@@ -202,7 +217,7 @@ function LayersPanel() {
   const handleUploadChange = React.useCallback(
     async (event) => {
       const file = event.target.files?.[0];
-      event.target.value = '';
+      event.target.value = "";
 
       if (!file) return;
 
@@ -213,21 +228,22 @@ function LayersPanel() {
         const text = await file.text();
         const raw = JSON.parse(text);
         const featureCollection = buildFeatureCollectionFromGeoJson(raw);
-        const layerName = file.name.replace(/\.(geo)?json$/i, '') || 'Capa subida';
+        const layerName =
+          file.name.replace(/\.(geo)?json$/i, "") || "Capa subida";
 
         actions.addUploadedLayer(featureCollection, layerName);
-        actions.setSidebarTab('uploads');
+        actions.setSidebarTab("uploads");
       } catch (error) {
         setUploadError(
           error instanceof Error
             ? error.message
-            : 'No se pudo cargar el archivo GeoJSON.'
+            : "No se pudo cargar el archivo GeoJSON.",
         );
       } finally {
         setIsUploading(false);
       }
     },
-    [actions]
+    [actions],
   );
 
   const renderLayersTab = () => (
@@ -240,7 +256,7 @@ function LayersPanel() {
           </div>
           <div className="mini-card mini-card--compact">
             <span className="mini-card__label">Total catálogo</span>
-            <span className="mini-card__value">{layers.length}</span>
+            <span className="mini-card__value">{manageableLayers.length}</span>
           </div>
         </div>
 
@@ -277,22 +293,38 @@ function LayersPanel() {
       <div className="lp-groups layers-tree__groups">
         {groupedLayerSearchResults.map(([dg, dgLayers]) => {
           const isGroupOpen = openGroupId === dg;
-          const visibleInGroup = dgLayers.filter((layer) => layer.visible).length;
+          const visibleInGroup = dgLayers.filter(
+            (layer) => layer.visible,
+          ).length;
           const hasRisk = dgLayers.some(
-            (layer) => (layerMetricsById.get(layer.id)?.riskCount || 0) > 0
+            (layer) => (layerMetricsById.get(layer.id)?.riskCount || 0) > 0,
+          );
+          const groupStatus = dgLayers.reduce(
+            (acc, layer) => {
+              const status = getLayerStatus(
+                layer,
+                mapViewportBounds,
+                layerMetricsById.get(layer.id),
+              );
+              if (status.tone === "loading") acc.loading += 1;
+              if (status.tone === "error") acc.error += 1;
+              if (status.tone === "waiting") acc.waiting += 1;
+              return acc;
+            },
+            { loading: 0, error: 0, waiting: 0 },
           );
 
           const isDimmed = openGroupId !== null && openGroupId !== dg;
 
           return (
             <section
-              className={`lp-group layers-tree__group-card${isGroupOpen ? ' lp-group--active' : ''}${isDimmed ? ' lp-group--dimmed' : ''}`}
+              className={`lp-group layers-tree__group-card${isGroupOpen ? " lp-group--active" : ""}${isDimmed ? " lp-group--dimmed" : ""}`}
               key={dg}
             >
               <button
                 aria-expanded={isGroupOpen}
-                className={`lp-group__head${isGroupOpen ? ' is-open' : ''}${
-                  hasRisk ? ' has-risk' : ''
+                className={`lp-group__head${isGroupOpen ? " is-open" : ""}${
+                  hasRisk ? " has-risk" : ""
                 }`}
                 onClick={() => {
                   setOpenGroupId((current) => (current === dg ? null : dg));
@@ -300,7 +332,9 @@ function LayersPanel() {
                 }}
                 type="button"
               >
-                <span className={`lp-group__chevron${isGroupOpen ? ' is-open' : ''}`}>
+                <span
+                  className={`lp-group__chevron${isGroupOpen ? " is-open" : ""}`}
+                >
                   <svg
                     aria-hidden="true"
                     fill="none"
@@ -318,12 +352,24 @@ function LayersPanel() {
                     />
                   </svg>
                 </span>
-                <span
-                  className="lp-group__name"
-                  title={getLayerGroupLabel(dg)}
-                >
+                <span className="lp-group__name" title={getLayerGroupLabel(dg)}>
                   {getLayerGroupLabel(dg)}
                 </span>
+                {groupStatus.loading > 0 ? (
+                  <span className="lp-group__meta lp-group__meta--loading">
+                    {groupStatus.loading} cargando
+                  </span>
+                ) : null}
+                {groupStatus.error > 0 ? (
+                  <span className="lp-group__meta lp-group__meta--error">
+                    {groupStatus.error} error
+                  </span>
+                ) : null}
+                {groupStatus.waiting > 0 ? (
+                  <span className="lp-group__meta lp-group__meta--waiting">
+                    {groupStatus.waiting} en espera
+                  </span>
+                ) : null}
                 <span className="lp-group__count">
                   {visibleInGroup}/{dgLayers.length}
                 </span>
@@ -333,46 +379,67 @@ function LayersPanel() {
               {isGroupOpen ? (
                 <div className="layers-tree">
                   {dgLayers.map((layer) => {
-                  const isSelected = layer.id === selectedLayerId;
-                  const isExpanded = layer.id === openLayerId;
-                  const isFocused = layer.id === focusedLayerId;
-                  const isHovered = layer.id === hoveredLayerId;
-                  const filteredFeatureCount = filteredCountByLayer.get(layer.id) || 0;
-                  const geometryClass = getGeometryClass(layer.geometryType);
-                  const metrics = layerMetricsById.get(layer.id) || {
-                    averageProgress: null,
-                    riskCount: 0,
-                    totalElements: 0,
-                    health: 'active',
-                  };
-                  const status = getLayerStatus(layer, mapViewportBounds, metrics);
-                  const metricSummary = buildMetricSummary(layer, metrics);
-                  const isMetricsLoaded =
-                    !layer.databaseLayer || layer.loadStatus === 'loaded';
-                  const statusIndicatorClass = isMetricsLoaded
-                    ? metrics.health === 'risk'
-                      ? ' is-risk'
-                      : ' is-active'
-                    : ' is-pending';
-                  const statusIndicatorLabel = isMetricsLoaded
-                    ? metrics.health === 'risk'
-                      ? 'Riesgo'
-                      : 'Activo'
-                    : status.label;
-                  const subtitleText =
-                    isMetricsLoaded
-                      ? `${layer.visible ? 'Visible' : 'Oculta'} · ${filteredFeatureCount} visibles · ${layer.geometryType}`
-                      : `${status.label} · ${status.detail} · ${layer.geometryType}`;
+                    const isSelected = layer.id === selectedLayerId;
+                    const isExpanded = layer.id === openLayerId;
+                    const isFocused = layer.id === focusedLayerId;
+                    const isHovered = layer.id === hoveredLayerId;
+                    const filteredFeatureCount =
+                      filteredCountByLayer.get(layer.id) || 0;
+                    const geometryClass = getGeometryClass(layer.geometryType);
+                    const metrics = layerMetricsById.get(layer.id) || {
+                      averageProgress: null,
+                      riskCount: 0,
+                      totalElements: 0,
+                      health: "active",
+                    };
+                    const status = getLayerStatus(
+                      layer,
+                      mapViewportBounds,
+                      metrics,
+                    );
+                    const metricSummary = buildMetricSummary(layer, metrics);
+                    const isMetricsLoaded =
+                      !layer.databaseLayer || layer.loadStatus === "loaded";
+                    const statusIndicatorClass = getStatusIndicatorClass(
+                      status.tone,
+                      isMetricsLoaded && metrics.health === "risk",
+                    );
+                    const statusIndicatorLabel =
+                      isMetricsLoaded && metrics.health === "risk"
+                        ? "Riesgo"
+                        : status.label;
+                    const subtitleParts = [
+                      layer.visible ? "Visible" : "Oculta",
+                      status.detail,
+                      layer.geometryType,
+                    ];
+                    if (
+                      isMetricsLoaded &&
+                      layer.visible &&
+                      Number.isFinite(filteredFeatureCount)
+                    ) {
+                      subtitleParts.splice(
+                        1,
+                        0,
+                        `${filteredFeatureCount} visibles`,
+                      );
+                    }
+                    const subtitleText = subtitleParts.join(" · ");
+                    const itemHealthClass = isMetricsLoaded
+                      ? metrics.health === "risk"
+                        ? " is-risk"
+                        : " is-active-health"
+                      : status.tone === "error"
+                        ? " is-risk"
+                        : " is-active-health";
 
                     return (
                       <article
-                        className={`layers-tree__item${isSelected ? ' is-selected' : ''}${
-                          isExpanded ? ' is-open' : ''
+                        className={`layers-tree__item${isSelected ? " is-selected" : ""}${
+                          isExpanded ? " is-open" : ""
                         }${
-                          isFocused ? ' is-focused' : ''
-                        }${isHovered ? ' is-hovered' : ''}${
-                          metrics.health === 'risk' ? ' is-risk' : ' is-active-health'
-                        }`}
+                          isFocused ? " is-focused" : ""
+                        }${isHovered ? " is-hovered" : ""}${itemHealthClass}`}
                         draggable
                         key={layer.id}
                         onMouseEnter={() => actions.setHoveredLayerId(layer.id)}
@@ -396,10 +463,14 @@ function LayersPanel() {
                             </button>
 
                             <button
-                              aria-label={layer.visible ? 'Ocultar capa' : 'Mostrar capa'}
+                              aria-label={
+                                layer.visible ? "Ocultar capa" : "Mostrar capa"
+                              }
                               aria-pressed={layer.visible}
-                              className={`layer-toggle${layer.visible ? ' layer-toggle--on' : ''}`}
-                              onClick={() => actions.toggleLayerVisibility(layer.id)}
+                              className={`layer-toggle${layer.visible ? " layer-toggle--on" : ""}`}
+                              onClick={() =>
+                                actions.toggleLayerVisibility(layer.id)
+                              }
                               type="button"
                             >
                               <span className="layer-toggle__track" />
@@ -413,7 +484,7 @@ function LayersPanel() {
                                 actions.focusLayer(layer.id);
                                 mapApi?.zoomToLayer?.(layer.id);
                                 setOpenLayerId((current) =>
-                                  current === layer.id ? null : layer.id
+                                  current === layer.id ? null : layer.id,
                                 );
                               }}
                               type="button"
@@ -422,18 +493,25 @@ function LayersPanel() {
                                 <img
                                   alt=""
                                   className="layers-tree__icon"
-                                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                  onError={(e) => {
+                                    e.currentTarget.style.display = "none";
+                                  }}
                                   src={getLayerIcon(layer.name)}
                                 />
                               ) : (
                                 <span
                                   className={`layers-tree__geometry ${geometryClass}`}
-                                  style={{ '--layer-color': layer.style?.color || layer.color }}
+                                  style={{
+                                    "--layer-color":
+                                      layer.style?.color || layer.color,
+                                  }}
                                 />
                               )}
                               <span className="layers-tree__copy">
                                 <span className="layers-tree__title-row">
-                                  <strong title={layer.name}>{layer.name}</strong>
+                                  <strong title={layer.name}>
+                                    {layer.name}
+                                  </strong>
                                   <span
                                     className={`layers-tree__status-indicator${
                                       statusIndicatorClass
@@ -447,7 +525,9 @@ function LayersPanel() {
                                   {subtitleText}
                                 </span>
                               </span>
-                              <span className={`layers-tree__accordion${isExpanded ? ' is-open' : ''}`}>
+                              <span
+                                className={`layers-tree__accordion${isExpanded ? " is-open" : ""}`}
+                              >
                                 <svg
                                   aria-hidden="true"
                                   fill="none"
@@ -477,8 +557,8 @@ function LayersPanel() {
                               <span
                                 className={`layers-tree__meta-chip${
                                   isMetricsLoaded && metrics.riskCount > 0
-                                    ? ' is-danger'
-                                    : ' is-neutral'
+                                    ? " is-danger"
+                                    : " is-neutral"
                                 }`}
                               >
                                 <span className="layers-tree__meta-dot" />
@@ -489,6 +569,17 @@ function LayersPanel() {
                                 {metricSummary.total}
                               </span>
                             </span>
+                            {status.tone === "error" ? (
+                              <button
+                                className="ghost-button ghost-button--small layers-tree__retry-btn"
+                                onClick={() =>
+                                  actions.retryDatabaseLayerLoad(layer.id)
+                                }
+                                type="button"
+                              >
+                                Reintentar
+                              </button>
+                            ) : null}
                           </div>
                         </div>
 
@@ -496,7 +587,9 @@ function LayersPanel() {
                           <div className="layers-tree__details">
                             <label className="slider-field slider-field--compact">
                               <span>Opacidad</span>
-                              <strong>{Math.round((layer.style?.opacity || 0) * 100)}%</strong>
+                              <strong>
+                                {Math.round((layer.style?.opacity || 0) * 100)}%
+                              </strong>
                               <input
                                 max="1"
                                 min="0.2"
@@ -543,7 +636,7 @@ function LayersPanel() {
       <div className="basemap-grid">
         {baseMaps.map((baseMap) => (
           <button
-            className={`basemap-card${activeBaseMap.id === baseMap.id ? ' is-active' : ''}`}
+            className={`basemap-card${activeBaseMap.id === baseMap.id ? " is-active" : ""}`}
             key={baseMap.id}
             onClick={() => actions.setActiveBaseMapId(baseMap.id)}
             type="button"
@@ -571,8 +664,8 @@ function LayersPanel() {
       <div className="sidebar-panel__intro">
         <h3>Subir capa</h3>
         <p>
-          Importa capas temporales en formato GeoJSON. El historial de esta vista
-          muestra únicamente capas cargadas por usuario.
+          Importa capas temporales en formato GeoJSON. El historial de esta
+          vista muestra únicamente capas cargadas por usuario.
         </p>
       </div>
 
@@ -592,7 +685,9 @@ function LayersPanel() {
           </div>
           <div className="mini-card mini-card--compact">
             <span className="mini-card__label">Formato</span>
-            <span className="mini-card__value mini-card__value--small">GeoJSON</span>
+            <span className="mini-card__value mini-card__value--small">
+              GeoJSON
+            </span>
           </div>
         </div>
 
@@ -602,7 +697,7 @@ function LayersPanel() {
           onClick={handleUploadClick}
           type="button"
         >
-          {isUploading ? 'Cargando...' : 'Subir capa'}
+          {isUploading ? "Cargando..." : "Subir capa"}
         </button>
       </div>
 
@@ -614,7 +709,8 @@ function LayersPanel() {
         <div className="empty-state empty-state--compact">
           <h3 className="empty-state__title">Sin capas subidas</h3>
           <p className="empty-state__text">
-            Selecciona un archivo `.geojson` o `.json` para incorporarlo al mapa.
+            Selecciona un archivo `.geojson` o `.json` para incorporarlo al
+            mapa.
           </p>
         </div>
       ) : (
@@ -625,21 +721,23 @@ function LayersPanel() {
 
             return (
               <article
-                className={`upload-history__item${isSelected ? ' is-selected' : ''}`}
+                className={`upload-history__item${isSelected ? " is-selected" : ""}`}
                 key={layer.id}
               >
                 <div className="upload-history__head">
                   <span
                     className={`layers-tree__geometry ${getGeometryClass(
-                      layer.geometryType
+                      layer.geometryType,
                     )}`}
-                    style={{ '--layer-color': layer.style?.color || layer.color }}
+                    style={{
+                      "--layer-color": layer.style?.color || layer.color,
+                    }}
                   />
                   <div className="upload-history__copy">
                     <strong>{layer.name}</strong>
                     <span>
                       {layer.geometryType} · {featureCount} elemento
-                      {featureCount === 1 ? '' : 's'}
+                      {featureCount === 1 ? "" : "s"}
                     </span>
                   </div>
                 </div>
@@ -650,7 +748,7 @@ function LayersPanel() {
                     onClick={() => actions.toggleLayerVisibility(layer.id)}
                     type="button"
                   >
-                    {layer.visible ? 'Ocultar' : 'Mostrar'}
+                    {layer.visible ? "Ocultar" : "Mostrar"}
                   </button>
                   <button
                     className="ghost-button ghost-button--small lp-btn--danger"
@@ -679,14 +777,14 @@ function LayersPanel() {
 
       <div className="gis-tabs" role="tablist" aria-label="Secciones del panel">
         {[
-          ['layers', 'Capas'],
-          ['basemaps', 'Base Maps'],
-          ['uploads', 'Subir capa'],
-          ['data', 'Filtros / Datos'],
+          ["layers", "Capas"],
+          ["basemaps", "Base Maps"],
+          ["uploads", "Subir capa"],
+          ["data", "Filtros / Datos"],
         ].map(([value, label]) => (
           <button
             aria-selected={sidebarTab === value}
-            className={`gis-tab${sidebarTab === value ? ' is-active' : ''}`}
+            className={`gis-tab${sidebarTab === value ? " is-active" : ""}`}
             key={value}
             onClick={() => actions.setSidebarTab(value)}
             role="tab"
@@ -698,13 +796,13 @@ function LayersPanel() {
       </div>
 
       <div className="gis-sidebar__body">
-        {sidebarTab === 'layers' ? renderLayersTab() : null}
-        {sidebarTab === 'basemaps' ? renderBasemapsTab() : null}
-        {sidebarTab === 'uploads' ? renderUploadsTab() : null}
-        {sidebarTab === 'data' ? renderDataTab() : null}
+        {sidebarTab === "layers" ? renderLayersTab() : null}
+        {sidebarTab === "basemaps" ? renderBasemapsTab() : null}
+        {sidebarTab === "uploads" ? renderUploadsTab() : null}
+        {sidebarTab === "data" ? renderDataTab() : null}
       </div>
     </aside>
   );
 }
 
-export default LayersPanel;
+export default React.memo(LayersPanel);

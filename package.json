@@ -4,10 +4,12 @@
   "scripts": {
     "build": "npm --prefix frontend run build",
     "build:hostinger": "npm --prefix frontend run build:hostinger",
+    "build:hostinger:solofullstack": "npm --prefix frontend run build:hostinger:solofullstack",
     "build:hostinger:sigsobse2": "npm --prefix frontend run build:hostinger:sigsobse2",
     "build:hostinger:sigsobseclean": "npm --prefix frontend run build:hostinger:sigsobseclean",
     "smoke:backend": "./scripts/smoke-check-backend.sh",
     "start": "npm --prefix backend start",
+    "start:frontend": "npm --prefix frontend run start:local",
     "check": "npm --prefix backend run check && npm --prefix frontend run build"
   },
   "dependencies": {

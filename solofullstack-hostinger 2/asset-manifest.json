@@ -1,0 +1,16 @@
+{
+  "files": {
+    "main.css": "/web/sandbox/PRUEBAS/solofullstack/static/css/main.29a1e13a.css",
+    "main.js": "/web/sandbox/PRUEBAS/solofullstack/static/js/main.ca7e3360.js",
+    "static/js/488.692f545e.chunk.js": "/web/sandbox/PRUEBAS/solofullstack/static/js/488.692f545e.chunk.js",
+    "service-worker.js": "/web/sandbox/PRUEBAS/solofullstack/service-worker.js",
+    "index.html": "/web/sandbox/PRUEBAS/solofullstack/index.html",
+    "main.29a1e13a.css.map": "/web/sandbox/PRUEBAS/solofullstack/static/css/main.29a1e13a.css.map",
+    "main.ca7e3360.js.map": "/web/sandbox/PRUEBAS/solofullstack/static/js/main.ca7e3360.js.map",
+    "488.692f545e.chunk.js.map": "/web/sandbox/PRUEBAS/solofullstack/static/js/488.692f545e.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.29a1e13a.css",
+    "static/js/main.ca7e3360.js"
+  ]
+}
