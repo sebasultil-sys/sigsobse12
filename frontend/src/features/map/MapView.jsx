@@ -189,6 +189,15 @@ const STATUS_PRIORITY = {
   proceso: 2,
   'sin iniciar': 1,
 };
+// Temporal: forzar KPIs estáticos para despliegue inmediato en Hostinger.
+const FORCE_STATIC_EXECUTIVE_KPIS = true;
+const STATIC_EXECUTIVE_KPIS = {
+  totalObras: 1066,
+  entregadas: 19,
+  terminadas: 564,
+  enProceso: 422,
+  sinIniciar: 34,
+};
 const FALLBACK_EXECUTIVE_KPIS = {
   totalObras: 0,
   entregadas: 0,
@@ -220,6 +229,23 @@ function buildFallbackKpiSummaryPayload() {
     },
     by_table: [],
     source: 'fallback-empty',
+  };
+}
+
+function buildStaticKpiSummaryPayload() {
+  return {
+    generated_at: new Date().toISOString(),
+    cache_ttl_ms: 0,
+    totals: {
+      total_obras: STATIC_EXECUTIVE_KPIS.totalObras,
+      entregadas: STATIC_EXECUTIVE_KPIS.entregadas,
+      terminadas: STATIC_EXECUTIVE_KPIS.terminadas,
+      en_proceso: STATIC_EXECUTIVE_KPIS.enProceso,
+      sin_iniciar: STATIC_EXECUTIVE_KPIS.sinIniciar,
+      otro: 0,
+    },
+    by_table: [],
+    source: 'static-manual',
   };
 }
 
@@ -2191,6 +2217,12 @@ function MapView({ mode = 'desktop' }) {
     (options = {}) => {
       const { force = false, silent = false } = options;
       const hasSummary = Boolean(globalKpiSummaryRef.current);
+      if (FORCE_STATIC_EXECUTIVE_KPIS) {
+        setGlobalKpiSummary(buildStaticKpiSummaryPayload());
+        setGlobalKpiLoading(false);
+        setGlobalKpiError('');
+        return Promise.resolve();
+      }
 
       let cancelled = false;
       if (!silent) {
@@ -3950,6 +3982,26 @@ function MapView({ mode = 'desktop' }) {
 
     return summary;
   }, [layerMetricsById, operationalVisibleLayers]);
+  const analysisStatusDisplaySummary = React.useMemo(() => {
+    if (!FORCE_STATIC_EXECUTIVE_KPIS) return analysisStatusSummary;
+    const completionPct =
+      STATIC_EXECUTIVE_KPIS.totalObras > 0
+        ? Math.round(
+            ((STATIC_EXECUTIVE_KPIS.entregadas + STATIC_EXECUTIVE_KPIS.terminadas) /
+              STATIC_EXECUTIVE_KPIS.totalObras) *
+              100
+          )
+        : 0;
+    return {
+      ...analysisStatusSummary,
+      total: STATIC_EXECUTIVE_KPIS.totalObras,
+      entregadas: STATIC_EXECUTIVE_KPIS.entregadas,
+      terminadas: STATIC_EXECUTIVE_KPIS.terminadas,
+      enProceso: STATIC_EXECUTIVE_KPIS.enProceso,
+      sinIniciar: STATIC_EXECUTIVE_KPIS.sinIniciar,
+      completionPct,
+    };
+  }, [analysisStatusSummary]);
   const analysisCoverageSummary = React.useMemo(() => {
     const geometryBuckets = {
       point: 0,
@@ -4826,44 +4878,44 @@ function MapView({ mode = 'desktop' }) {
                 <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
                   <span>Total obras</span>
                   <strong>
-                    {Number(analysisStatusSummary.total || 0).toLocaleString('es-MX')}
+                    {Number(analysisStatusDisplaySummary.total || 0).toLocaleString('es-MX')}
                   </strong>
                 </article>
                 <article className="map-view__analysis-kpi map-view__analysis-kpi--ok">
                   <span>Obras inauguradas</span>
                   <strong>
-                    {Number(analysisStatusSummary.entregadas || 0).toLocaleString('es-MX')}
+                    {Number(analysisStatusDisplaySummary.entregadas || 0).toLocaleString('es-MX')}
                   </strong>
                 </article>
                 <article className="map-view__analysis-kpi map-view__analysis-kpi--ok">
                   <span>Obras terminadas</span>
                   <strong>
-                    {Number(analysisStatusSummary.terminadas || 0).toLocaleString('es-MX')}
+                    {Number(analysisStatusDisplaySummary.terminadas || 0).toLocaleString('es-MX')}
                   </strong>
                 </article>
                 <article className="map-view__analysis-kpi map-view__analysis-kpi--warn">
                   <span>Obras en proceso</span>
                   <strong>
-                    {Number(analysisStatusSummary.enProceso || 0).toLocaleString('es-MX')}
+                    {Number(analysisStatusDisplaySummary.enProceso || 0).toLocaleString('es-MX')}
                   </strong>
                 </article>
                 <article className="map-view__analysis-kpi map-view__analysis-kpi--risk">
                   <span>Obras sin iniciar</span>
                   <strong>
-                    {Number(analysisStatusSummary.sinIniciar || 0).toLocaleString('es-MX')}
+                    {Number(analysisStatusDisplaySummary.sinIniciar || 0).toLocaleString('es-MX')}
                   </strong>
                 </article>
                 <article className="map-view__analysis-kpi map-view__analysis-kpi--info">
                   <span>Cierre (inaugurada + terminada)</span>
-                  <strong>{Number(analysisStatusSummary.completionPct || 0)}%</strong>
+                  <strong>{Number(analysisStatusDisplaySummary.completionPct || 0)}%</strong>
                 </article>
               </div>
               <div className="map-view__analysis-row">
                 <span className="map-view__analysis-pill">
-                  Riesgos detectados: {Number(analysisStatusSummary.riskCount || 0).toLocaleString('es-MX')}
+                  Riesgos detectados: {Number(analysisStatusDisplaySummary.riskCount || 0).toLocaleString('es-MX')}
                 </span>
                 <span className="map-view__analysis-pill">
-                  Avance promedio: {Number(analysisStatusSummary.avgProgress || 0)}%
+                  Avance promedio: {Number(analysisStatusDisplaySummary.avgProgress || 0)}%
                 </span>
               </div>
             </>
@@ -5060,7 +5112,7 @@ function MapView({ mode = 'desktop' }) {
     actions,
     analysisCoverageSummary,
     analysisMode,
-    analysisStatusSummary,
+    analysisStatusDisplaySummary,
     adjustBufferRadius,
     adjustHotspotBuffer,
     adjustPopulationRadius,
@@ -5173,6 +5225,10 @@ function MapView({ mode = 'desktop' }) {
     return Array.from(tableNames);
   }, [layers]);
   const panelKpiCounts = React.useMemo(() => {
+    if (FORCE_STATIC_EXECUTIVE_KPIS) {
+      return { ...STATIC_EXECUTIVE_KPIS };
+    }
+
     const rows = Array.isArray(globalKpiSummary?.by_table)
       ? globalKpiSummary.by_table
       : null;
@@ -5240,7 +5296,9 @@ function MapView({ mode = 'desktop' }) {
     if (selectedKpiStatus === 'sin iniciar') return Number(panelKpiCounts.sinIniciar || 0);
     return Number(panelKpiCounts.totalObras || 0);
   }, [panelKpiCounts, selectedKpiStatus]);
-  const displayedRecordCount = Number(filteredFeatureCount || 0);
+  const displayedRecordCount = FORCE_STATIC_EXECUTIVE_KPIS
+    ? Number(STATIC_EXECUTIVE_KPIS.totalObras || 0)
+    : Number(filteredFeatureCount || 0);
 
   const fullscreenKpi = React.useMemo(() => {
     const visibleLayers = mapLayersForRender.filter((layer) => layer?.visible);
