@@ -1,4 +1,3 @@
-console.log("🔥 BACKEND NUEVO CARGADO 🔥");
 // ─────────────────────────────────────────────────────────────────────────────
 // server.js — Servidor Express (API REST del backend GIS)
 //
@@ -33,7 +32,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, ".env") });
 
 const app = express();
-const port = Number(process.env.PORT || 3001);
+const port = Number(process.env.PORT || 10000);
 app.set("trust proxy", 1);
 
 // Schema de PostgreSQL donde viven todas las tablas de obra pública
@@ -2274,51 +2273,168 @@ async function handleSearch(req, res) {
   }
 }
 
+// ── Diagnóstico ───────────────────────────────────────────────────────────────
+
+async function handleDebug(req, res) {
+  console.log('[GIS API] GET /api/debug llamado');
+  let dbOk = false;
+  let dbError = null;
+  try {
+    await query('SELECT 1');
+    dbOk = true;
+  } catch (err) {
+    dbError = err?.message || String(err);
+  }
+  res.json({
+    ok: true,
+    service: 'sigsobse-backend',
+    node_env: process.env.NODE_ENV || 'development',
+    port,
+    schema: GIS_SCHEMA,
+    frontend_build: HAS_FRONTEND_BUILD,
+    db_ok: dbOk,
+    db_error: dbError,
+    uptime_seconds: Math.round(process.uptime()),
+    ts: new Date().toISOString(),
+    routes: [
+      'GET  /health',
+      'GET  /test',
+      'GET  /layers',
+      'GET  /layer/:table',
+      'GET  /search',
+      'GET  /kpi/summary',
+      'GET  /kpi/audit',
+      'GET  /kpis/summary',
+      'GET  /kpis/audit',
+      'GET  /population/query',
+      'POST /cache/invalidate',
+      'GET  /api/debug',
+      'POST /api/update-avance',
+    ],
+  });
+}
+
+// ── Actualizar avance de obra ──────────────────────────────────────────────────
+
+async function handleUpdateAvance(req, res) {
+  console.log('[GIS API] POST /api/update-avance - BODY:', req.body);
+
+  const { tabla, id_obra, nombre_obra, avance, estatus } = req.body || {};
+
+  if (!tabla) {
+    return res.status(400).json({ ok: false, error: 'Falta el campo "tabla".' });
+  }
+  if (avance === undefined && estatus === undefined) {
+    return res.status(400).json({ ok: false, error: 'Debe enviar al menos "avance" o "estatus".' });
+  }
+  if (!id_obra && !nombre_obra) {
+    return res.status(400).json({ ok: false, error: 'Falta el identificador de la obra (id_obra o nombre_obra).' });
+  }
+
+  let catalog;
+  try {
+    catalog = await getLayerCatalog();
+  } catch (err) {
+    console.error('[GIS API] Error obteniendo catálogo en update-avance:', err?.message || err);
+    return res.status(500).json({ ok: false, error: 'Error al verificar catálogo de capas.' });
+  }
+
+  const tableEntry = catalog.find(
+    (entry) => String(entry?.table_name || '').toLowerCase() === String(tabla).toLowerCase(),
+  );
+
+  if (!tableEntry) {
+    return res.status(404).json({
+      ok: false,
+      error: `Tabla "${tabla}" no encontrada en el schema ${GIS_SCHEMA}.`,
+    });
+  }
+
+  try {
+    const colsResult = await query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = $1 AND table_name = $2`,
+      [GIS_SCHEMA, tableEntry.table_name],
+    );
+    const colNames = colsResult.rows.map((r) => String(r.column_name || '').toUpperCase());
+
+    const safeSchema = quoteIdentifier(GIS_SCHEMA);
+    const safeTable = quoteIdentifier(tableEntry.table_name);
+
+    // Detectar columna identificadora
+    const ID_CANDIDATES = ['ID_OBRA', 'IDOBRA', 'CVE_OBRA', 'CVEOBRA', 'OBRA_ID', 'NOMBRE_OBRA', 'OBRA', 'ID', 'OBJECTID'];
+    const NAME_CANDIDATES = ['NOMBRE_OBRA', 'OBRA', 'NOMBRE'];
+
+    let idColumn = null;
+    let idValue = null;
+
+    if (id_obra) {
+      idColumn = ID_CANDIDATES.find((c) => colNames.includes(c)) || null;
+      idValue = id_obra;
+    } else {
+      idColumn = NAME_CANDIDATES.find((c) => colNames.includes(c)) || null;
+      idValue = nombre_obra;
+    }
+
+    if (!idColumn) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No se encontró columna de identificación en la tabla.',
+        columnas_disponibles: colNames,
+      });
+    }
+
+    // Detectar columnas de avance y estatus
+    const AVANCE_CANDIDATES = ['AVANCE_REAL', 'AVANCE REAL', 'AVANCE', 'PCT_AVANCE', 'PORCENTAJE'];
+    const ESTATUS_CANDIDATES = ['FESTATUS', 'ESTATUS', 'ESTADO', 'STATUS'];
+
+    const avanceCol = AVANCE_CANDIDATES.find((c) => colNames.includes(c));
+    const estatusCol = ESTATUS_CANDIDATES.find((c) => colNames.includes(c));
+
+    const setClauses = [];
+    const params = [];
+
+    if (avance !== undefined && avanceCol) {
+      params.push(avance);
+      setClauses.push(`${quoteIdentifier(avanceCol)} = $${params.length}`);
+    }
+    if (estatus !== undefined && estatusCol) {
+      params.push(estatus);
+      setClauses.push(`${quoteIdentifier(estatusCol)} = $${params.length}`);
+    }
+
+    if (!setClauses.length) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No se encontraron columnas de avance/estatus en esta tabla.',
+        columnas_disponibles: colNames,
+      });
+    }
+
+    params.push(idValue);
+    const sql = `UPDATE ${safeSchema}.${safeTable} SET ${setClauses.join(', ')} WHERE ${quoteIdentifier(idColumn)}::text = $${params.length}`;
+
+    console.log('[GIS API] SQL update-avance:', sql, params);
+    const result = await query(sql, params);
+
+    invalidateLayerGeoJsonCache(tableEntry.table_name);
+
+    console.log(`[GIS API] update-avance OK: ${result.rowCount} fila(s) actualizadas`);
+    res.json({
+      ok: true,
+      tabla: tableEntry.table_name,
+      filas_actualizadas: result.rowCount,
+      campos_actualizados: setClauses.map((c) => c.split(' =')[0].replace(/"/g, '')),
+    });
+  } catch (err) {
+    console.error('[GIS API] Error en update-avance:', err?.message || err);
+    res.status(500).json({ ok: false, error: err?.message || 'Error al actualizar avance.' });
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RUTAS DE LA API — registradas en / y en /api (mismo handler, sin duplicar lógica)
 // ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/update-avance — Actualiza avance, estatus y campos de una obra
-// Body: { tabla, nombre, avance, estatus, fecha_inauguracion, motivo_cancelacion }
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function handleUpdateAvance(req, res) {
-  const { tabla, nombre, avance, estatus, fecha_inauguracion, motivo_cancelacion } = req.body || {};
-
-  if (!tabla || !nombre) {
-    return res.status(400).json({ ok: false, error: "tabla y nombre son obligatorios" });
-  }
-
-  if (avance !== undefined && avance !== null && (typeof avance !== "number" || avance < 0 || avance > 100)) {
-    return res.status(400).json({ ok: false, error: "avance debe ser un número entre 0 y 100" });
-  }
-
-  // Escapar nombre de tabla para prevenir SQL injection
-  const safeTable = `"${tabla.replace(/"/g, '""')}"`;
-
-  try {
-    const result = await pool.query(
-      `UPDATE ${safeTable}
-       SET
-         "AVANCE REAL"          = $1,
-         "ESTATUS"              = $2,
-         "fecha_inauguracion"   = $3,
-         "motivo_cancelacion"   = $4
-       WHERE TRIM("NOMBRE DEL SITIO INTERVENIDO") = TRIM($5)`,
-      [avance ?? null, estatus ?? null, fecha_inauguracion ?? null, motivo_cancelacion ?? null, nombre]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ ok: false, error: "No se encontró el registro con ese nombre en la tabla indicada" });
-    }
-
-    res.json({ ok: true, message: "Actualizado correctamente" });
-  } catch (error) {
-    console.error("[GIS API] Error update-avance:", error.message);
-    res.status(500).json({ ok: false, error: "Error interno del servidor" });
-  }
-}
 
 logBackend("[GIS API] Backend activo — rutas disponibles en / y /api");
 
@@ -2344,7 +2460,6 @@ for (const prefix of ["", "/api"]) {
   app.get(`${prefix}/kpis/summary`, handleKpiSummary);
   app.get(`${prefix}/population/query`, handlePopulationQuery);
   app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
-  app.post(`${prefix}/update-avance`, handleUpdateAvance);
 }
 
 logBackend("[GIS API] Ruta /api/layers disponible");
@@ -2355,6 +2470,11 @@ logBackend("[GIS API] Ruta /api/kpis/audit disponible");
 logBackend("[GIS API] Ruta /api/kpis/summary disponible");
 logBackend("[GIS API] Ruta /api/population/query disponible");
 logBackend("[GIS API] Ruta /api/search disponible");
+
+// Rutas de gestión — solo bajo /api
+app.get("/api/debug", handleDebug);
+app.post("/api/update-avance", handleUpdateAvance);
+logBackend("[GIS API] Ruta /api/debug disponible");
 logBackend("[GIS API] Ruta /api/update-avance disponible");
 
 populationAnalysisEngine
