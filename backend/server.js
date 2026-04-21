@@ -2277,6 +2277,48 @@ async function handleSearch(req, res) {
 // RUTAS DE LA API — registradas en / y en /api (mismo handler, sin duplicar lógica)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/update-avance — Actualiza avance, estatus y campos de una obra
+// Body: { tabla, nombre, avance, estatus, fecha_inauguracion, motivo_cancelacion }
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function handleUpdateAvance(req, res) {
+  const { tabla, nombre, avance, estatus, fecha_inauguracion, motivo_cancelacion } = req.body || {};
+
+  if (!tabla || !nombre) {
+    return res.status(400).json({ ok: false, error: "tabla y nombre son obligatorios" });
+  }
+
+  if (avance !== undefined && avance !== null && (typeof avance !== "number" || avance < 0 || avance > 100)) {
+    return res.status(400).json({ ok: false, error: "avance debe ser un número entre 0 y 100" });
+  }
+
+  // Escapar nombre de tabla para prevenir SQL injection
+  const safeTable = `"${tabla.replace(/"/g, '""')}"`;
+
+  try {
+    const result = await pool.query(
+      `UPDATE ${safeTable}
+       SET
+         "AVANCE REAL"          = $1,
+         "ESTATUS"              = $2,
+         "fecha_inauguracion"   = $3,
+         "motivo_cancelacion"   = $4
+       WHERE TRIM("NOMBRE DEL SITIO INTERVENIDO") = TRIM($5)`,
+      [avance ?? null, estatus ?? null, fecha_inauguracion ?? null, motivo_cancelacion ?? null, nombre]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "No se encontró el registro con ese nombre en la tabla indicada" });
+    }
+
+    res.json({ ok: true, message: "Actualizado correctamente" });
+  } catch (error) {
+    console.error("[GIS API] Error update-avance:", error.message);
+    res.status(500).json({ ok: false, error: "Error interno del servidor" });
+  }
+}
+
 logBackend("[GIS API] Backend activo — rutas disponibles en / y /api");
 
 // GET / → sirve frontend o estado del backend
@@ -2301,6 +2343,7 @@ for (const prefix of ["", "/api"]) {
   app.get(`${prefix}/kpis/summary`, handleKpiSummary);
   app.get(`${prefix}/population/query`, handlePopulationQuery);
   app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
+  app.post(`${prefix}/update-avance`, handleUpdateAvance);
 }
 
 logBackend("[GIS API] Ruta /api/layers disponible");
@@ -2311,6 +2354,7 @@ logBackend("[GIS API] Ruta /api/kpis/audit disponible");
 logBackend("[GIS API] Ruta /api/kpis/summary disponible");
 logBackend("[GIS API] Ruta /api/population/query disponible");
 logBackend("[GIS API] Ruta /api/search disponible");
+logBackend("[GIS API] Ruta /api/update-avance disponible");
 
 populationAnalysisEngine
   .ensureLoaded()
