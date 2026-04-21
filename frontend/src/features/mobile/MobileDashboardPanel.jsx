@@ -1,6 +1,5 @@
 import React from 'react';
 import { useGISWorkspace } from '../../app/GISWorkspaceContext';
-import { shouldCountFeature } from '../map/movilidadLayerUtils';
 
 const ANALYSIS_VIEWS = [
   { id: 'general', label: 'General' },
@@ -15,21 +14,13 @@ const ANALYSIS_SCOPES = [
   { id: 'visible', label: 'Activas' },
 ];
 
-// Normaliza un valor de status a una clave canónica (igual que GeoJsonLayer.js).
-function resolveStatus(rawValue) {
-  if (!rawValue) return null;
-  const v = String(rawValue)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
-  if (v.includes('entregad')) return 'entregado';
-  if (v.includes('terminad') || v.includes('concluid') || v.includes('finaliz')) return 'terminado';
-  if (v.includes('proceso') || v.includes('ejecuci') || v.includes('avance')) return 'proceso';
-  if (v.includes('sin iniciar') || v.includes('no inici')) return 'sin iniciar';
-  return null;
-}
-
-const STATUS_ICON_KEYS_LOCAL = ['F_ESTATUS', 'ESTATUS', 'estatus', 'ESTADO', 'estado', 'STATUS', 'status'];
+const MANUAL_WORKS_COUNTER = {
+  total: 1066,
+  inauguradas: 19,
+  terminadas: 564,
+  proceso: 422,
+  sinIniciar: 34,
+};
 
 function firstPropertyValue(properties, keys) {
   for (const key of keys) {
@@ -98,7 +89,7 @@ function KpiCard({ label, value, variant, note }) {
   );
 }
 
-// Tarjeta de conteo por estatus con color específico (proceso/terminado/entregado/sin iniciar)
+// Tarjeta de conteo para KPIs de obras (total/inauguradas/terminadas/en proceso/sin iniciar)
 function StatusKpiCard({ label, value, color }) {
   return (
     <div className="exec-kpi exec-kpi--status" style={{ '--status-color': color }}>
@@ -268,25 +259,6 @@ function MobileDashboardPanel() {
     () => Array.from(layerBudgetById.values()).reduce((total, amount) => total + amount, 0),
     [layerBudgetById]
   );
-
-  // Conteo de obras por estatus: proceso / terminado / entregado / sin iniciar
-  const statusCounts = React.useMemo(() => {
-    const counts = { proceso: 0, terminado: 0, entregado: 0, 'sin iniciar': 0, otro: 0 };
-    scopedFeatures.forEach(({ layer, feature, properties }) => {
-      if (!shouldCountFeature(feature, layer)) return;
-      let resolved = null;
-      for (const key of STATUS_ICON_KEYS_LOCAL) {
-        const raw = properties?.[key];
-        if (raw != null && raw !== '') {
-          resolved = resolveStatus(raw);
-          if (resolved) break;
-        }
-      }
-      if (resolved && counts[resolved] !== undefined) counts[resolved] += 1;
-      else if (resolved === null) counts.otro += 1;
-    });
-    return counts;
-  }, [scopedFeatures]);
 
   const featureStats = React.useMemo(() => {
     const contracts = new Set();
@@ -475,10 +447,11 @@ function MobileDashboardPanel() {
 
       {/* Conteo de obras por estatus */}
       <div className="dash-status-grid">
-        <StatusKpiCard label="En proceso" value={formatInteger(statusCounts.proceso)} color="#FF9800" />
-        <StatusKpiCard label="Terminadas" value={formatInteger(statusCounts.terminado)} color="#4CAF50" />
-        <StatusKpiCard label="Entregadas" value={formatInteger(statusCounts.entregado)} color="#4FC3F7" />
-        <StatusKpiCard label="Sin iniciar" value={formatInteger(statusCounts['sin iniciar'])} color="#F44336" />
+        <StatusKpiCard label="Total de obra" value={formatInteger(MANUAL_WORKS_COUNTER.total)} color="#1E88E5" />
+        <StatusKpiCard label="Inauguradas" value={formatInteger(MANUAL_WORKS_COUNTER.inauguradas)} color="#4FC3F7" />
+        <StatusKpiCard label="Terminadas" value={formatInteger(MANUAL_WORKS_COUNTER.terminadas)} color="#4CAF50" />
+        <StatusKpiCard label="En proceso" value={formatInteger(MANUAL_WORKS_COUNTER.proceso)} color="#FF9800" />
+        <StatusKpiCard label="Sin iniciar" value={formatInteger(MANUAL_WORKS_COUNTER.sinIniciar)} color="#F44336" />
       </div>
 
       <div className="dash-kpi-grid">
