@@ -189,15 +189,12 @@ const STATUS_PRIORITY = {
   proceso: 2,
   'sin iniciar': 1,
 };
-const USE_STATIC_EXECUTIVE_KPIS =
-  String(process.env.REACT_APP_USE_STATIC_EXECUTIVE_KPIS || '').toLowerCase() ===
-  'true';
-const STATIC_EXECUTIVE_KPIS = {
-  totalObras: 1514,
-  entregadas: 138,
-  terminadas: 618,
-  enProceso: 580,
-  sinIniciar: 177,
+const FALLBACK_EXECUTIVE_KPIS = {
+  totalObras: 0,
+  entregadas: 0,
+  terminadas: 0,
+  enProceso: 0,
+  sinIniciar: 0,
 };
 const ENABLE_GIS_DEBUG_LOGS =
   String(process.env.REACT_APP_GIS_DEBUG_LOGS || '').toLowerCase() === 'true';
@@ -209,20 +206,20 @@ const CURRENCY_FORMATTER = new Intl.NumberFormat('es-MX', {
   maximumFractionDigits: 0,
 });
 
-function buildStaticKpiSummaryPayload() {
+function buildFallbackKpiSummaryPayload() {
   return {
     generated_at: new Date().toISOString(),
     cache_ttl_ms: 0,
     totals: {
-      total_obras: STATIC_EXECUTIVE_KPIS.totalObras,
-      entregadas: STATIC_EXECUTIVE_KPIS.entregadas,
-      terminadas: STATIC_EXECUTIVE_KPIS.terminadas,
-      en_proceso: STATIC_EXECUTIVE_KPIS.enProceso,
-      sin_iniciar: STATIC_EXECUTIVE_KPIS.sinIniciar,
+      total_obras: FALLBACK_EXECUTIVE_KPIS.totalObras,
+      entregadas: FALLBACK_EXECUTIVE_KPIS.entregadas,
+      terminadas: FALLBACK_EXECUTIVE_KPIS.terminadas,
+      en_proceso: FALLBACK_EXECUTIVE_KPIS.enProceso,
+      sin_iniciar: FALLBACK_EXECUTIVE_KPIS.sinIniciar,
       otro: 0,
     },
     by_table: [],
-    source: 'static-fallback',
+    source: 'fallback-empty',
   };
 }
 
@@ -2194,12 +2191,6 @@ function MapView({ mode = 'desktop' }) {
     (options = {}) => {
       const { force = false, silent = false } = options;
       const hasSummary = Boolean(globalKpiSummaryRef.current);
-      if (USE_STATIC_EXECUTIVE_KPIS) {
-        setGlobalKpiSummary(buildStaticKpiSummaryPayload());
-        setGlobalKpiLoading(false);
-        setGlobalKpiError('');
-        return Promise.resolve();
-      }
 
       let cancelled = false;
       if (!silent) {
@@ -2222,15 +2213,19 @@ function MapView({ mode = 'desktop' }) {
             error?.status === 404 ||
             errorMessage.toLowerCase().includes('ruta no encontrada');
           if (isMissingKpiRoute) {
-            setGlobalKpiSummary(buildStaticKpiSummaryPayload());
-            setGlobalKpiError('');
+            if (!hasSummary) {
+              setGlobalKpiSummary(buildFallbackKpiSummaryPayload());
+            }
+            setGlobalKpiError(
+              'No se encontró el endpoint de KPIs en el backend.'
+            );
             return;
           }
 
-          // Si falla la red/API y aún no tenemos resumen, usamos fallback canónico
-          // para evitar que el panel se quede con subtotales parciales de capas cargadas.
+          // Si falla la red/API y aún no tenemos resumen, usamos fallback en cero
+          // para evitar mostrar cifras estáticas desactualizadas.
           if (!hasSummary) {
-            setGlobalKpiSummary(buildStaticKpiSummaryPayload());
+            setGlobalKpiSummary(buildFallbackKpiSummaryPayload());
           }
           setGlobalKpiError(
             'No se pudieron actualizar los KPIs globales en este momento.'
@@ -5178,38 +5173,23 @@ function MapView({ mode = 'desktop' }) {
     return Array.from(tableNames);
   }, [layers]);
   const panelKpiCounts = React.useMemo(() => {
-    if (USE_STATIC_EXECUTIVE_KPIS) {
-      return { ...STATIC_EXECUTIVE_KPIS };
-    }
-
-    const totals = globalKpiSummary?.totals;
-    if (totals) {
-      return {
-        totalObras: parseKpiCount(totals.total_obras),
-        entregadas: parseKpiCount(totals.entregadas),
-        terminadas: parseKpiCount(totals.terminadas),
-        enProceso: parseKpiCount(totals.en_proceso),
-        sinIniciar: parseKpiCount(totals.sin_iniciar),
-      };
-    }
-
     const rows = Array.isArray(globalKpiSummary?.by_table)
       ? globalKpiSummary.by_table
       : null;
-    if (rows && operationalDatabaseTableNames.length) {
+    if (rows?.length) {
       const allowedTables = new Set(operationalDatabaseTableNames);
-      const filteredRows = rows.filter((row) =>
-        {
-          const tableName = String(row?.table_name || '').trim();
-          if (!allowedTables.has(tableName)) return false;
-          const rowGeometryType = String(row?.geometry_type || '').toUpperCase();
-          if (rowGeometryType && !rowGeometryType.includes('POINT')) return false;
-          return true;
-        }
-      );
+      const candidateRows = operationalDatabaseTableNames.length
+        ? rows.filter((row) => {
+            const tableName = String(row?.table_name || '').trim();
+            if (!allowedTables.has(tableName)) return false;
+            const rowGeometryType = String(row?.geometry_type || '').toUpperCase();
+            if (rowGeometryType && !rowGeometryType.includes('POINT')) return false;
+            return true;
+          })
+        : rows;
 
-      if (filteredRows.length) {
-        const aggregated = filteredRows.reduce(
+      if (candidateRows.length) {
+        const aggregated = candidateRows.reduce(
           (accumulator, row) => {
             accumulator.total_obras += parseKpiCount(row?.total);
             accumulator.entregadas += parseKpiCount(row?.entregado);
@@ -5236,22 +5216,23 @@ function MapView({ mode = 'desktop' }) {
       }
     }
 
-    // Evita mostrar subtotales parciales del cliente cuando no hay KPI global.
+    const totals = globalKpiSummary?.totals;
+    if (totals) {
+      return {
+        totalObras: parseKpiCount(totals.total_obras),
+        entregadas: parseKpiCount(totals.entregadas),
+        terminadas: parseKpiCount(totals.terminadas),
+        enProceso: parseKpiCount(totals.en_proceso),
+        sinIniciar: parseKpiCount(totals.sin_iniciar),
+      };
+    }
+
     return {
-      ...STATIC_EXECUTIVE_KPIS,
+      ...FALLBACK_EXECUTIVE_KPIS,
     };
   }, [globalKpiSummary, operationalDatabaseTableNames]);
 
   const selectedStatusFeatureCount = React.useMemo(() => {
-    if (USE_STATIC_EXECUTIVE_KPIS) {
-      if (!selectedKpiStatus) return Number(STATIC_EXECUTIVE_KPIS.totalObras || 0);
-      if (selectedKpiStatus === 'entregado') return Number(STATIC_EXECUTIVE_KPIS.entregadas || 0);
-      if (selectedKpiStatus === 'terminado') return Number(STATIC_EXECUTIVE_KPIS.terminadas || 0);
-      if (selectedKpiStatus === 'proceso') return Number(STATIC_EXECUTIVE_KPIS.enProceso || 0);
-      if (selectedKpiStatus === 'sin iniciar') return Number(STATIC_EXECUTIVE_KPIS.sinIniciar || 0);
-      return Number(STATIC_EXECUTIVE_KPIS.totalObras || 0);
-    }
-
     if (!selectedKpiStatus) return Number(panelKpiCounts.totalObras || 0);
     if (selectedKpiStatus === 'entregado') return Number(panelKpiCounts.entregadas || 0);
     if (selectedKpiStatus === 'terminado') return Number(panelKpiCounts.terminadas || 0);
@@ -5259,9 +5240,7 @@ function MapView({ mode = 'desktop' }) {
     if (selectedKpiStatus === 'sin iniciar') return Number(panelKpiCounts.sinIniciar || 0);
     return Number(panelKpiCounts.totalObras || 0);
   }, [panelKpiCounts, selectedKpiStatus]);
-  const displayedRecordCount = USE_STATIC_EXECUTIVE_KPIS
-    ? Number(STATIC_EXECUTIVE_KPIS.totalObras || 0)
-    : Number(filteredFeatureCount || 0);
+  const displayedRecordCount = Number(filteredFeatureCount || 0);
 
   const fullscreenKpi = React.useMemo(() => {
     const visibleLayers = mapLayersForRender.filter((layer) => layer?.visible);
