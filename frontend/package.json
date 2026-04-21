@@ -2,7 +2,7 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
-   "homepage": "/web/sandbox/PRUEBAS/Visualizador_Web2",
+  "homepage": "/web/sandbox/PRUEBAS/Visualizador_Web2",
 
 
   "dependencies": {
@@ -17,7 +17,9 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "build:hostinger": "PUBLIC_URL=/web/sandbox/PRUEBAS/Visualizador_Web2 react-scripts build",
+    "build:hostinger": "PUBLIC_URL=/ react-scripts build",
+    "build:hostinger:root": "PUBLIC_URL=/ react-scripts build",
+    "build:hostinger:visualizador_web2": "PUBLIC_URL=/web/sandbox/PRUEBAS/Visualizador_Web2 react-scripts build",
     "build:hostinger:solofullstack": "PUBLIC_URL=/web/sandbox/PRUEBAS/solofullstack react-scripts build",
     "build:hostinger:sigsobse2": "PUBLIC_URL=/web/sandbox/PRUEBAS/sigsobse2 react-scripts build",
     "build:hostinger:sigsobseclean": "PUBLIC_URL=/web/sandbox/PRUEBAS/sigsobseClean react-scripts build",

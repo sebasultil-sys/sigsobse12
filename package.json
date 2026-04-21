@@ -4,6 +4,9 @@
   "scripts": {
     "build": "npm --prefix frontend run build",
     "build:hostinger": "npm --prefix frontend run build:hostinger",
+    "build:hostinger:root": "npm --prefix frontend run build:hostinger:root",
+    "build:hostinger:full": "npm --prefix backend ci && npm --prefix frontend ci && npm --prefix frontend run build:hostinger",
+    "build:hostinger:visualizador_web2": "npm --prefix frontend run build:hostinger:visualizador_web2",
     "build:hostinger:solofullstack": "npm --prefix frontend run build:hostinger:solofullstack",
     "build:hostinger:sigsobse2": "npm --prefix frontend run build:hostinger:sigsobse2",
     "build:hostinger:sigsobseclean": "npm --prefix frontend run build:hostinger:sigsobseclean",
