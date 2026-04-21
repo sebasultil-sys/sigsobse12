@@ -1,3 +1,4 @@
+console.log("🔥 BACKEND NUEVO CARGADO 🔥");
 // ─────────────────────────────────────────────────────────────────────────────
 // server.js — Servidor Express (API REST del backend GIS)
 //
