@@ -116,6 +116,27 @@ const corsOptions = {
 };
 
 const MOVILIDAD_LAYERS = ["trolebus", "cablebus", "tren_ligero"];
+const DEFAULT_OBRAS_SPLIT_TABLES = [
+  // Nombres canónicos de la arquitectura centralizada
+  "obras_puntos",
+  "obras_lineas",
+  "obras_poligonos",
+  // Compatibilidad hacia atrás
+  "puntos_bd_sig",
+  "lineas_bd_sig",
+  "poligonos_bd_sig",
+  "puntos_db",
+  "lineas_db",
+  "poligonos_db",
+];
+const CORE_OPERATIONAL_TABLE_NAMES = [
+  "obras_puntos",
+  "obras_lineas",
+  "obras_poligonos",
+  "puntos_bd_sig",
+  "lineas_bd_sig",
+  "poligonos_bd_sig",
+];
 
 function normalizeMobilityKey(value) {
   return String(value || "")
@@ -254,6 +275,8 @@ const layerGeoJsonInFlight = new Map();
 const rateLimitBuckets = new Map();
 let kpiSummaryCache = null;
 let kpiSummaryCacheTime = 0;
+let worldCupKpiCache = null;
+let worldCupKpiCacheTime = 0;
 let kpiRouteHealthCache = {
   checked_at: null,
   checked_at_epoch_ms: 0,
@@ -263,6 +286,11 @@ let kpiRouteHealthCache = {
   total_obras: null,
 };
 let lastRateLimitSweepAt = 0;
+const mundialObrasCacheByKey = new Map();
+const MUNDIAL_OBRAS_CACHE_TTL_MS = Math.max(
+  15000,
+  Number(process.env.GIS_MUNDIAL_CACHE_TTL_MS || 3 * 60 * 1000),
+);
 
 // Borra el caché para forzar una nueva consulta a PostgreSQL
 function invalidateCatalogCache() {
@@ -374,6 +402,159 @@ function hasValidWgs84Geometry(geometry) {
   return coordinatePairs.every((pair) => isValidLngLatPair(pair));
 }
 
+const DERIVED_YEAR_PRIORITY = new Set(["2026", "2025", "2024"]);
+const EXPLICIT_YEAR_KEYS = new Set([
+  "year",
+  "anio",
+  "año",
+  "ejercicio",
+  "anio_ejercicio",
+  "año_ejercicio",
+]);
+const DERIVED_YEAR_KEYS = new Set([
+  "r_year",
+  "year",
+  "anio",
+  "año",
+  "ejercicio",
+  "anio_ejercicio",
+  "año_ejercicio",
+]);
+const DERIVED_DATE_KEYS = new Set([
+  "inicio_contrato",
+  "fecha_inicio",
+  "f_inicio",
+  "fecha_inicio_obra",
+  "inicio_obra",
+]);
+
+function normalizeKeyToken(rawKey) {
+  return String(rawKey || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function extractYearTokensFromValue(rawValue) {
+  if (rawValue == null || rawValue === "") return [];
+  const text = String(rawValue).trim();
+  if (!text) return [];
+
+  const years = new Set();
+  const fourDigit = text.match(/(?:19|20)\d{2}/g) || [];
+  fourDigit.forEach((year) => years.add(String(year)));
+
+  const twoDigitMatches = text.matchAll(/(^|[^0-9])(2[4-9]|3[0-5])(?=$|[^0-9])/g);
+  for (const match of twoDigitMatches) {
+    const yy = Number(match?.[2] || 0);
+    if (!Number.isFinite(yy) || yy < 24 || yy > 35) continue;
+    years.add(`20${String(yy).padStart(2, "0")}`);
+  }
+
+  return Array.from(years);
+}
+
+function deriveFeatureYear(properties = {}) {
+  const years = new Set();
+  const normalizedEntries = Object.entries(properties || {}).map(([key, value]) => [
+    key,
+    normalizeKeyToken(key),
+    value,
+  ]);
+
+  normalizedEntries.forEach(([, normalizedKey, value]) => {
+    if (!normalizedKey) return;
+    if (DERIVED_YEAR_KEYS.has(normalizedKey) || DERIVED_DATE_KEYS.has(normalizedKey)) {
+      extractYearTokensFromValue(value).forEach((year) => years.add(year));
+      return;
+    }
+    if (
+      normalizedKey.includes("year") ||
+      normalizedKey.includes("anio") ||
+      normalizedKey.includes("ejercicio") ||
+      normalizedKey.includes("fecha") ||
+      normalizedKey.includes("inicio")
+    ) {
+      extractYearTokensFromValue(value).forEach((year) => years.add(year));
+    }
+  });
+
+  if (!years.size) return "";
+  const sorted = Array.from(years).sort((left, right) => Number(right) - Number(left));
+  const preferred = sorted.find((year) => DERIVED_YEAR_PRIORITY.has(year));
+  return preferred || sorted[0] || "";
+}
+
+function resolveExplicitFeatureYear(properties = {}) {
+  const years = new Set();
+  const normalizedEntries = Object.entries(properties || {}).map(([key, value]) => [
+    key,
+    normalizeKeyToken(key),
+    value,
+  ]);
+
+  normalizedEntries.forEach(([, normalizedKey, value]) => {
+    if (!normalizedKey || !EXPLICIT_YEAR_KEYS.has(normalizedKey)) return;
+    extractYearTokensFromValue(value).forEach((year) => years.add(year));
+  });
+
+  if (!years.size) return "";
+  const sorted = Array.from(years).sort((left, right) => Number(right) - Number(left));
+  const preferred = sorted.find((year) => DERIVED_YEAR_PRIORITY.has(year));
+  return preferred || sorted[0] || "";
+}
+
+function normalizePropertyAliasKey(rawKey) {
+  return String(rawKey || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const PROPERTY_ALIAS_OVERRIDES = new Map([
+  // Campos observados en origen con espacios/símbolos
+  ["url_de_google_maps", "url_google_maps"],
+  ["url_google_maps", "url_google_maps"],
+  ["calle_domicilio", "calle_domicilio"],
+  ["origen_del_compromiso", "origen_del_compromiso"],
+  ["avance_real", "avance_real"],
+  ["fecha_actualizacion", "fecha_actualizacion"],
+  ["fecha_inauguracion", "fecha_inauguracion"],
+  ["motivo_cancelacion", "motivo_cancelacion"],
+  ["responsable_dg", "responsable_dg"],
+  ["origen_del_recurso", "origen_del_recurso"],
+  ["fondo_del_recurso", "fondo_del_recurso"],
+  ["capitulo_del_recurso", "capitulo_del_recurso"],
+  ["bloque_mundial", "bloque_mundial"],
+  ["clave_eje", "clave_eje"],
+  ["nombre_eje", "nombre_eje"],
+  ["clave_programa", "clave_programa"],
+  ["nombre_obra", "nombre_obra"],
+  ["superficie_m2", "superficie_m2"],
+  ["origen_compromiso", "origen_del_compromiso"],
+]);
+
+function applyPropertyAliases(properties = {}) {
+  const next = { ...(properties || {}) };
+  const sourceEntries = Object.entries(properties || {});
+
+  sourceEntries.forEach(([rawKey, rawValue]) => {
+    if (rawValue == null) return;
+    const normalizedKey = normalizePropertyAliasKey(rawKey);
+    if (!normalizedKey) return;
+
+    const targetKey = PROPERTY_ALIAS_OVERRIDES.get(normalizedKey) || normalizedKey;
+    if (next[targetKey] == null || next[targetKey] === "") {
+      next[targetKey] = rawValue;
+    }
+  });
+
+  return next;
+}
+
 function buildGeoJsonFeatureFromRow(row, geometryColumn) {
   const hasStructuredProperties =
     row?.properties &&
@@ -420,10 +601,24 @@ function buildGeoJsonFeatureFromRow(row, geometryColumn) {
   delete properties.geom;
   delete properties.geometry_geojson;
 
+  const explicitYear = resolveExplicitFeatureYear(properties);
+  const derivedYear = explicitYear || deriveFeatureYear(properties);
+  if (derivedYear) {
+    if (properties.R_YEAR == null || properties.R_YEAR === "") properties.R_YEAR = derivedYear;
+    if (properties.YEAR == null || properties.YEAR === "") properties.YEAR = derivedYear;
+    if (explicitYear) {
+      // Priorizamos la columna YEAR/year explícita para filtros consistentes.
+      properties.year = explicitYear;
+    } else if (properties.year == null || properties.year === "") {
+      properties.year = derivedYear;
+    }
+  }
+  const aliasedProperties = applyPropertyAliases(properties);
+
   return {
     type: 'Feature',
     geometry,
-    properties,
+    properties: aliasedProperties,
   };
 }
 
@@ -688,6 +883,19 @@ function isPointGeometryType(value) {
   return geometryType.includes("POINT");
 }
 
+// Las 3 tablas maestras del esquema centralizado deben incluirse en KPIs
+// aunque obras_lineas y obras_poligonos no sean geometría puntual.
+const CORE_OBRAS_TABLE_TOKENS = new Set([
+  "obras_puntos", "obras_lineas", "obras_poligonos",
+  "puntos_bd_sig", "lineas_bd_sig", "poligonos_bd_sig",
+  "puntos_db", "lineas_db", "poligonos_db",
+]);
+
+function isCoreObrasSplitTable(tableName) {
+  const normalized = normalizeTableToken(tableName);
+  return normalized ? CORE_OBRAS_TABLE_TOKENS.has(normalized) : false;
+}
+
 const DG_COLUMN_CANDIDATES = ["DG", "DIRECCIONGENERAL"];
 const STATUS_COLUMN_CANDIDATES = [
   "FESTATUS",
@@ -696,6 +904,9 @@ const STATUS_COLUMN_CANDIDATES = [
   "STATUS",
 ];
 const STRICT_WORK_ID_COLUMN_CANDIDATES = [
+  // Identificador institucional del esquema centralizado obras_puntos/lineas/poligonos
+  "CLAVE_UNICA",
+  "CLAVEUNICA",
   "ID_OBRA",
   "IDOBRA",
   "CVE_OBRA",
@@ -719,6 +930,78 @@ const GENERIC_WORK_ID_COLUMN_CANDIDATES = [
   "GID",
   "FID",
 ];
+const YEAR_COLUMN_CANDIDATES = [
+  "YEAR",
+  "ANIO",
+  "AÑO",
+  "EJERCICIO",
+  "ANIO_EJERCICIO",
+  "AÑO_EJERCICIO",
+];
+const YEAR_FALLBACK_COLUMN_CANDIDATES = [
+  "R_YEAR",
+  "R_ANIO",
+  "R_AÑO",
+  "FECHA_INICIO",
+  "F_INICIO",
+  "INICIO_CONTRATO",
+  "FECHA_INICIO_OBRA",
+  "INICIO_OBRA",
+];
+const LAYER_PROGRAM_COLUMN_CANDIDATES = [
+  "PROGRAMA",
+  "R_PROGR",
+  "R_PROGRAMA",
+  "N_PROGRAMA",
+  "NOMBRE_PROGRAMA",
+];
+const LAYER_EJE_COLUMN_CANDIDATES = [
+  "CLAVE_EJE",
+  "CVE_EJE",
+  "EJE",
+  "R_EJE",
+  "N_EJE",
+  "EJE_RECTOR",
+];
+const LAYER_DEPENDENCY_COLUMN_CANDIDATES = [
+  "DG",
+  "DIRECCION_GENERAL",
+  "DIRECCIONGENERAL",
+  "R_DG",
+];
+const LAYER_STATUS_COLUMN_CANDIDATES = [
+  "F_ESTATUS",
+  "ESTATUS",
+  "ESTADO",
+  "STATUS",
+];
+const LAYER_WORKTYPE_COLUMN_CANDIDATES = [
+  "TIPO",
+  "TIPO_OBRA",
+  "R_TIPO",
+  "R_TIPO_OBRA",
+];
+const LAYER_ALCALDIA_COLUMN_CANDIDATES = [
+  "ALCALDIA",
+  "DEMARCACION",
+  "R_ALCALDIA",
+];
+const LAYER_COLONIA_COLUMN_CANDIDATES = [
+  "COLONIA",
+  "BARRIO",
+  "R_COLONIA",
+];
+const LAYER_COMPANY_COLUMN_CANDIDATES = [
+  "EMPRESA",
+  "CONTRATISTA",
+  "RAZON_SOCIAL",
+];
+const LAYER_CONTRACT_COLUMN_CANDIDATES = [
+  "CONTRATO",
+  "NUMERO_CONTRATO",
+  "NO_CONTRATO",
+  "N_CONTRATO",
+];
 const ALLOW_GENERIC_WORK_ID_COLUMNS =
   String(process.env.GIS_ALLOW_GENERIC_WORK_ID_COLUMNS || "").toLowerCase() ===
   "true";
@@ -731,8 +1014,10 @@ const DEFAULT_KPI_CANONICAL_KEY_COLUMNS = [
 const KPI_CANONICAL_SOURCE_ENABLED =
   String(process.env.GIS_KPI_CANONICAL_SOURCE_ENABLED || "true").toLowerCase() !==
   "false";
+// Con la arquitectura split (obras_puntos/lineas/poligonos) no hay tabla canónica única.
+// Si GIS_KPI_CANONICAL_TABLE no está definida, el KPI usa el fallback por catálogo.
 const KPI_CANONICAL_TABLE = String(
-  process.env.GIS_KPI_CANONICAL_TABLE || "obras_centralizadas",
+  process.env.GIS_KPI_CANONICAL_TABLE || "",
 ).trim();
 const KPI_CANONICAL_KEY_COLUMNS = String(
   process.env.GIS_KPI_CANONICAL_KEY_COLUMNS || "",
@@ -754,6 +1039,34 @@ const KPI_CANONICAL_MIN_DISTINCT_RATIO = Math.max(
     Number(process.env.GIS_KPI_CANONICAL_MIN_DISTINCT_RATIO || 0.85),
   ),
 );
+const KPI_FIXED_TOTAL_OBRAS = (() => {
+  const raw = String(process.env.GIS_KPI_FIXED_TOTAL_OBRAS || "1031").trim();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed);
+})();
+
+function applyKpiFixedTotalOverride(summary = null) {
+  if (!summary || typeof summary !== "object") return summary;
+  if (!Number.isFinite(KPI_FIXED_TOTAL_OBRAS) || KPI_FIXED_TOTAL_OBRAS <= 0) {
+    return summary;
+  }
+
+  const totals = {
+    ...(summary?.totals || {}),
+    total_obras: KPI_FIXED_TOTAL_OBRAS,
+  };
+  const audit = {
+    ...(summary?.audit || {}),
+    fixed_total_obras: KPI_FIXED_TOTAL_OBRAS,
+  };
+
+  return {
+    ...summary,
+    totals,
+    audit,
+  };
+}
 
 function findColumnByCandidates(columns, candidates) {
   const candidateRank = new Map(
@@ -777,6 +1090,160 @@ function findColumnByCandidates(columns, candidates) {
   }
 
   return bestColumn || null;
+}
+
+function normalizeKpiYearFilter(rawYear) {
+  const value = String(rawYear || "").trim();
+  if (!value) return null;
+  const extracted = extractYearTokensFromValue(value);
+  if (!extracted.length) return null;
+  const sorted = extracted.sort((left, right) => Number(right) - Number(left));
+  return sorted[0] || null;
+}
+
+function normalizeKpiYearFilters(rawYear) {
+  const value = String(rawYear || "").trim();
+  if (!value) return [];
+  const extracted = extractYearTokensFromValue(value);
+  if (!extracted.length) return [];
+  const uniqueYears = Array.from(new Set(extracted));
+  return uniqueYears.sort((left, right) => Number(left) - Number(right));
+}
+
+function resolveYearFilterColumns(columns = []) {
+  function pickColumns(candidateList = []) {
+    const candidateRank = new Map(
+      candidateList.map((candidate, index) => [normalizeCatalogKey(candidate), index]),
+    );
+    const picked = [];
+    const seen = new Set();
+
+    (columns || []).forEach((column) => {
+      const columnName = String(column?.column_name || "").trim();
+      if (!columnName) return;
+      const normalized = normalizeCatalogKey(columnName);
+      if (!candidateRank.has(normalized)) return;
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      picked.push({
+        column_name: columnName,
+        rank: candidateRank.get(normalized),
+      });
+    });
+
+    return picked
+      .sort((left, right) => left.rank - right.rank)
+      .map((entry) => entry.column_name);
+  }
+
+  const primaryColumns = pickColumns(YEAR_COLUMN_CANDIDATES);
+  if (primaryColumns.length) return primaryColumns;
+  return pickColumns(YEAR_FALLBACK_COLUMN_CANDIDATES);
+}
+
+function buildYearFilterSql(yearColumns = [], yearFilter = null) {
+  const normalizedYears = normalizeKpiYearFilters(yearFilter);
+  if (!normalizedYears.length) return "TRUE";
+  if (!Array.isArray(yearColumns) || !yearColumns.length) return "FALSE";
+
+  const candidateColumns = yearColumns
+    .map((columnName) => String(columnName || "").trim())
+    .filter(Boolean);
+  if (!candidateColumns.length) return "FALSE";
+
+  const predicates = normalizedYears.flatMap((year) => {
+    const yearRegex = `(^|[^0-9])${year}([^0-9]|$)`;
+    return candidateColumns.map(
+      (columnName) => `${quoteIdentifier(columnName)}::text ~ '${yearRegex}'`
+    );
+  });
+  if (!predicates.length) return "FALSE";
+  return `(${predicates.join(" OR ")})`;
+}
+
+function normalizeLayerTextFilterValue(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) return null;
+  if (value.toLowerCase() === "all") return null;
+  return value;
+}
+
+function parseLayerBboxQuery(queryParams = {}) {
+  const rawBbox = String(queryParams?.bbox || "").trim();
+  let values = [];
+
+  if (rawBbox) {
+    values = rawBbox
+      .split(",")
+      .map((entry) => Number(String(entry || "").trim()))
+      .filter((value) => Number.isFinite(value));
+  } else {
+    values = [
+      Number(queryParams?.west),
+      Number(queryParams?.south),
+      Number(queryParams?.east),
+      Number(queryParams?.north),
+    ];
+  }
+
+  if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) {
+    return null;
+  }
+
+  const [west, south, east, north] = values;
+  if (west >= east || south >= north) return null;
+  if (west < -180 || east > 180 || south < -90 || north > 90) return null;
+  return { west, south, east, north };
+}
+
+function buildLayerFilterSql(columns = [], filters = {}, options = {}) {
+  const params = [];
+  const predicates = [];
+  const startIndex = Number(options?.startIndex || 1);
+
+  const pushExactFilter = (candidates, rawValue) => {
+    const value = normalizeLayerTextFilterValue(rawValue);
+    if (!value) return;
+    const columnName = findColumnByCandidates(columns, candidates)?.column_name;
+    if (!columnName) return;
+    const safeColumn = quoteIdentifier(columnName);
+    params.push(String(value).toLowerCase());
+    predicates.push(`LOWER(TRIM(COALESCE(${safeColumn}::text, ''))) = $${startIndex + params.length - 1}`);
+  };
+
+  const pushContainsFilter = (candidates, rawValue) => {
+    const value = normalizeLayerTextFilterValue(rawValue);
+    if (!value) return;
+    const columnName = findColumnByCandidates(columns, candidates)?.column_name;
+    if (!columnName) return;
+    const safeColumn = quoteIdentifier(columnName);
+    params.push(`%${String(value).toLowerCase()}%`);
+    predicates.push(`LOWER(TRIM(COALESCE(${safeColumn}::text, ''))) LIKE $${startIndex + params.length - 1}`);
+  };
+
+  const yearFilter = normalizeLayerTextFilterValue(filters?.year);
+  if (yearFilter) {
+    const yearColumns = resolveYearFilterColumns(columns);
+    const yearSql = buildYearFilterSql(yearColumns, yearFilter);
+    if (yearSql !== "TRUE") {
+      predicates.push(yearSql);
+    }
+  }
+
+  pushExactFilter(LAYER_STATUS_COLUMN_CANDIDATES, filters?.status);
+  pushExactFilter(LAYER_PROGRAM_COLUMN_CANDIDATES, filters?.program);
+  pushExactFilter(LAYER_DEPENDENCY_COLUMN_CANDIDATES, filters?.dependency);
+  pushExactFilter(LAYER_EJE_COLUMN_CANDIDATES, filters?.eje);
+  pushExactFilter(LAYER_WORKTYPE_COLUMN_CANDIDATES, filters?.workType);
+  pushExactFilter(LAYER_ALCALDIA_COLUMN_CANDIDATES, filters?.alcaldia);
+  pushContainsFilter(LAYER_COLONIA_COLUMN_CANDIDATES, filters?.colonia);
+  pushContainsFilter(LAYER_COMPANY_COLUMN_CANDIDATES, filters?.empresa);
+  pushContainsFilter(LAYER_CONTRACT_COLUMN_CANDIDATES, filters?.contract);
+
+  return {
+    sql: predicates.length ? predicates.join(" AND ") : "TRUE",
+    params,
+  };
 }
 
 function resolveWorkIdColumn(columns) {
@@ -844,7 +1311,7 @@ function buildStatusKeyCaseSql(statusColumnSql) {
   if (!statusColumnSql) return "NULL";
   return `
     CASE
-      WHEN ${statusColumnSql}::text ILIKE '%entregad%' THEN 'entregado'
+      WHEN ${statusColumnSql}::text ILIKE '%entregad%' OR ${statusColumnSql}::text ILIKE '%inaugurad%' OR ${statusColumnSql}::text ILIKE '%inagurad%' THEN 'entregado'
       WHEN ${statusColumnSql}::text ILIKE '%terminad%' OR ${statusColumnSql}::text ILIKE '%concluid%' OR ${statusColumnSql}::text ILIKE '%finaliz%' THEN 'terminado'
       WHEN ${statusColumnSql}::text ILIKE '%sin iniciar%' OR ${statusColumnSql}::text ILIKE '%no inici%' THEN 'sin_iniciar'
       WHEN ${statusColumnSql}::text ILIKE '%proceso%' OR ${statusColumnSql}::text ILIKE '%ejecuci%' OR ${statusColumnSql}::text ILIKE '%avance%' THEN 'proceso'
@@ -960,6 +1427,8 @@ async function getTableKpiSummary(
   statusColumn,
   workIdColumn,
   geometryColumn = null,
+  yearFilter = null,
+  yearColumns = [],
 ) {
   const safeSchema = quoteIdentifier(GIS_SCHEMA);
   const safeTable = quoteIdentifier(tableName);
@@ -974,6 +1443,7 @@ async function getTableKpiSummary(
     tableName,
     safeGeometryColumn,
   );
+  const yearFilterSql = buildYearFilterSql(yearColumns, yearFilter);
 
   if (!statusColumn) {
     const result = safeWorkIdColumn
@@ -981,9 +1451,10 @@ async function getTableKpiSummary(
           `
             WITH base AS (
               SELECT
-                ${normalizedWorkIdSql} AS work_id
+              ${normalizedWorkIdSql} AS work_id
               FROM ${safeSchema}.${safeTable}
               WHERE ${geometryFilterSql}
+                AND ${yearFilterSql}
             )
             SELECT
               COUNT(DISTINCT work_id)::bigint AS total
@@ -996,6 +1467,7 @@ async function getTableKpiSummary(
             SELECT COUNT(*)::bigint AS total
             FROM ${safeSchema}.${safeTable}
             WHERE ${geometryFilterSql}
+              AND ${yearFilterSql}
           `
         );
 
@@ -1019,6 +1491,7 @@ async function getTableKpiSummary(
               ${normalizedWorkIdSql} AS work_id
             FROM ${safeSchema}.${safeTable}
             WHERE ${geometryFilterSql}
+              AND ${yearFilterSql}
           )
           SELECT
             COUNT(DISTINCT work_id) FILTER (WHERE work_id IS NOT NULL)::bigint AS total,
@@ -1036,6 +1509,7 @@ async function getTableKpiSummary(
               ${statusCaseSql} AS status_key
             FROM ${safeSchema}.${safeTable}
             WHERE ${geometryFilterSql}
+              AND ${yearFilterSql}
           )
           SELECT
             COUNT(*)::bigint AS total,
@@ -1068,7 +1542,8 @@ async function getTableKpiSummary(
   };
 }
 
-async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
+async function getGlobalDistinctKpiTotals(targetTables, columnsByTable, options = {}) {
+  const yearFilter = normalizeKpiYearFilter(options?.yearFilter);
   const safeSchema = quoteIdentifier(GIS_SCHEMA);
   const unionQueries = [];
 
@@ -1095,6 +1570,8 @@ async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
       tableName,
       safeGeometryColumn,
     );
+    const yearColumns = resolveYearFilterColumns(columns);
+    const yearFilterSql = buildYearFilterSql(yearColumns, yearFilter);
     const statusCaseSql = statusColumn
       ? buildStatusKeyCaseSql(quoteIdentifier(statusColumn))
       : "NULL";
@@ -1107,6 +1584,7 @@ async function getGlobalDistinctKpiTotals(targetTables, columnsByTable) {
       WHERE ${safeWorkIdColumn} IS NOT NULL
         AND BTRIM(${safeWorkIdColumn}::text) <> ''
         AND ${geometryFilterSql}
+        AND ${yearFilterSql}
     `);
   });
 
@@ -1320,9 +1798,12 @@ async function getCanonicalKpiSummary(columnsByTable) {
   };
 }
 
-async function getKpiSummaryCatalog() {
-  const validCachedSummary = getValidKpiSummaryCache();
-  if (validCachedSummary) return validCachedSummary;
+async function getKpiSummaryCatalog(options = {}) {
+  const yearFilter = normalizeKpiYearFilter(options?.yearFilter);
+  if (!yearFilter) {
+    const validCachedSummary = getValidKpiSummaryCache();
+    if (validCachedSummary) return validCachedSummary;
+  }
 
   const catalog = await getLayerCatalog();
   const schemaColumns = await getSchemaColumns();
@@ -1336,11 +1817,13 @@ async function getKpiSummaryCatalog() {
   }, new Map());
 
   try {
-    const canonicalSummary = await getCanonicalKpiSummary(columnsByTable);
-    if (canonicalSummary) {
-      kpiSummaryCache = canonicalSummary;
-      kpiSummaryCacheTime = Date.now();
-      return canonicalSummary;
+    if (!yearFilter) {
+      const canonicalSummary = await getCanonicalKpiSummary(columnsByTable);
+      if (canonicalSummary) {
+        kpiSummaryCache = canonicalSummary;
+        kpiSummaryCacheTime = Date.now();
+        return canonicalSummary;
+      }
     }
   } catch (error) {
     logBackendError(
@@ -1353,13 +1836,14 @@ async function getKpiSummaryCatalog() {
     (table) =>
       table?.has_geom &&
       isOperationalDg(table?.dg) &&
-      // Regla general: capas puntuales.
-      // Excepción: movilidad (trolebus/cablebus/tren_ligero) puede ser línea y
-      // debe incluirse para KPI ejecutivo.
+      // Incluir: puntos (regla base), movilidad (trolebús/cablebús/tren),
+      // y las 3 tablas maestras obras_puntos/lineas/poligonos aunque sean
+      // lineas o polígonos — todas llevan clave_unica para conteo correcto.
       (
         !table?.geometry_type ||
         isPointGeometryType(table?.geometry_type) ||
-        isMobilityTableName(table?.table_name || table?.name)
+        isMobilityTableName(table?.table_name || table?.name) ||
+        isCoreObrasSplitTable(table?.table_name || table?.name)
       )
   );
 
@@ -1377,6 +1861,7 @@ async function getKpiSummaryCatalog() {
       table,
       statusColumn: statusColumn || null,
       workIdColumn: workIdColumn || null,
+      yearColumns: resolveYearFilterColumns(columns),
       // Incluimos tablas con ID de obra o, al menos, con columna de estatus.
       // Cuando no hay ID, se contabilizan por suma de filas de la tabla.
       includeInTotals: Boolean(tableName && (workIdColumn || statusColumn)),
@@ -1395,13 +1880,21 @@ async function getKpiSummaryCatalog() {
     includedTableCandidates,
     KPI_SUMMARY_CONCURRENCY,
     async (candidate) => {
-      const { tableName, statusColumn, workIdColumn, table } = candidate;
+      const {
+        tableName,
+        statusColumn,
+        workIdColumn,
+        yearColumns,
+        table,
+      } = candidate;
       try {
         const summary = await getTableKpiSummary(
           tableName,
           statusColumn || null,
           workIdColumn || null,
           table?.geometry_column || null,
+          yearFilter,
+          yearColumns,
         );
         return {
           ...summary,
@@ -1449,7 +1942,8 @@ async function getKpiSummaryCatalog() {
   );
   const globalDistinctTotals = await getGlobalDistinctKpiTotals(
     targetTables,
-    columnsByTable
+    columnsByTable,
+    { yearFilter }
   );
   const includedWithWorkIdCount = includedTableCandidates.filter(
     (candidate) => Boolean(candidate.workIdColumn)
@@ -1479,6 +1973,7 @@ async function getKpiSummaryCatalog() {
   const summaryPayload = {
     generated_at: new Date().toISOString(),
     cache_ttl_ms: KPI_CACHE_TTL_MS,
+    year_filter: yearFilter || null,
     totals,
     by_table: rows.filter(Boolean),
     audit: {
@@ -1495,8 +1990,10 @@ async function getKpiSummaryCatalog() {
     },
   };
 
-  kpiSummaryCache = summaryPayload;
-  kpiSummaryCacheTime = Date.now();
+  if (!yearFilter) {
+    kpiSummaryCache = summaryPayload;
+    kpiSummaryCacheTime = Date.now();
+  }
   return summaryPayload;
 }
 
@@ -1767,6 +2264,176 @@ function getSimplifyTolerance(tableName) {
   return Number(process.env.GIS_SIMPLIFY_TOLERANCE || 0.0001);
 }
 
+function buildRowPropertiesJsonSql(columns = [], geometryColumn = null) {
+  const excludedColumns = new Set(
+    [geometryColumn, "geometry", "geom", "the_geom"]
+      .filter(Boolean)
+      .map((entry) => String(entry || "").toLowerCase().trim()),
+  );
+
+  const selectedColumns = (columns || [])
+    .map((column) => String(column?.column_name || "").trim())
+    .filter(Boolean)
+    .filter((columnName) => !excludedColumns.has(columnName.toLowerCase()));
+
+  if (!selectedColumns.length) {
+    return `(to_jsonb(row_data) - ($2::text) - 'geometry' - 'geom' - 'the_geom')`;
+  }
+
+  const jsonArgs = selectedColumns
+    .map((columnName) => {
+      const jsonKey = columnName.replace(/'/g, "''");
+      return `'${jsonKey}', row_data.${quoteIdentifier(columnName)}`;
+    })
+    .join(", ");
+
+  return `
+    (
+      jsonb_build_object(${jsonArgs})
+      || jsonb_build_object('__geom_column__', $2::text)
+      - '__geom_column__'
+    )
+  `;
+}
+
+function buildContractEnrichmentFragments(
+  tableName,
+  basePropertiesSql = `(to_jsonb(row_data) - ($2::text) - 'geometry' - 'geom' - 'the_geom')`,
+) {
+  if (!isCoreObrasSplitTable(tableName)) {
+    return {
+      propertiesSql: basePropertiesSql,
+      joinSql: "",
+    };
+  }
+
+  const normalizedTable = normalizeTableToken(tableName);
+  const obraNameSql =
+    normalizedTable === "obras_poligonos" || normalizedTable === "poligonos_bd_sig"
+      ? `LOWER(TRIM(COALESCE(row_data.nombre_obra::text, '')))`
+      : `LOWER(TRIM(COALESCE(row_data."NOMBRE_OBRA"::text, '')))`;
+  const claveUnicaSql = `LOWER(TRIM(COALESCE(row_data.clave_unica::text, '')))`;
+
+  const joinSql = `
+      LEFT JOIN LATERAL (
+        SELECT
+          jsonb_strip_nulls(
+            jsonb_build_object(
+              'empresa', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.empresa::text), ''), ' • '), ''),
+              'empresa_sup', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.empresa_sup::text), ''), ' • '), ''),
+              'contrato', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.contrato::text), ''), ' • '), ''),
+              'contr_sup', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.contr_sup::text), ''), ' • '), ''),
+              'inicio_contr', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.inicio_contr::text), ''), ' • '), ''),
+              'fin_contr', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.fin_contr::text), ''), ' • '), ''),
+              'inicio_contr_sup', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.inicio_contr_sup::text), ''), ' • '), ''),
+              'fin_contr_sup', NULLIF(string_agg(DISTINCT NULLIF(TRIM(f.fin_contr_sup::text), ''), ' • '), ''),
+              'responsable_contrato', NULLIF(
+                string_agg(
+                  DISTINCT NULLIF(
+                    TRIM(
+                      COALESCE(NULLIF(TRIM(f.jud::text), ''), NULLIF(TRIM(f.jud_sup::text), ''))
+                    ),
+                    ''
+                  ),
+                  ' • '
+                ),
+                ''
+              ),
+              'jud_responsable', NULLIF(
+                string_agg(
+                  DISTINCT NULLIF(
+                    TRIM(
+                      COALESCE(NULLIF(TRIM(f.jud::text), ''), NULLIF(TRIM(f.jud_sup::text), ''))
+                    ),
+                    ''
+                  ),
+                  ' • '
+                ),
+                ''
+              )
+            )
+          ) AS contract_props
+        FROM ${quoteIdentifier(GIS_SCHEMA)}.${quoteIdentifier("frentes_obra")} AS f
+        WHERE (
+          ${claveUnicaSql} <> ''
+          AND LOWER(TRIM(COALESCE(f.clave_unica::text, ''))) = ${claveUnicaSql}
+        )
+        OR (
+          ${obraNameSql} <> ''
+          AND LOWER(TRIM(COALESCE(f.nombre_obra::text, ''))) = ${obraNameSql}
+        )
+      ) AS contract_data ON TRUE
+  `;
+
+  return {
+    propertiesSql: `
+      (
+        COALESCE(contract_data.contract_props, '{}'::jsonb)
+        || ${basePropertiesSql}
+      )
+    `,
+    joinSql,
+  };
+}
+
+function buildRenderableGeometrySql(tableName, normalizedGeomSql) {
+  const linearizedGeomSql = `ST_CurveToLine(${normalizedGeomSql})`;
+  return `
+    CASE
+      WHEN ST_GeometryType(${linearizedGeomSql}) ILIKE '%SURFACE%'
+        OR ST_GeometryType(${linearizedGeomSql}) ILIKE '%POLYGON%'
+      THEN ST_Multi(ST_CollectionExtract(${linearizedGeomSql}, 3))
+      WHEN ST_GeometryType(${linearizedGeomSql}) ILIKE '%LINE%'
+      THEN ST_Multi(ST_CollectionExtract(${linearizedGeomSql}, 2))
+      ELSE ${linearizedGeomSql}
+    END
+  `;
+}
+
+function buildSafeGeoJsonGeometrySql(renderableGeomSql, tolerancePlaceholder = "$1") {
+  const simplifiedGeomSql = `ST_Simplify(${renderableGeomSql}, (${tolerancePlaceholder}::double precision), true)`;
+  const normalizedGeomSql = `ST_MakeValid(ST_CurveToLine(${simplifiedGeomSql}))`;
+  const geometryTypeSql = `UPPER(COALESCE(ST_GeometryType(${normalizedGeomSql}), ''))`;
+  const pointGeomSql = `ST_Multi(ST_CollectionExtract(${normalizedGeomSql}, 1))`;
+  const lineGeomSql = `ST_Multi(ST_CollectionExtract(${normalizedGeomSql}, 2))`;
+  const polygonGeomSql = `ST_Multi(ST_CollectionExtract(${normalizedGeomSql}, 3))`;
+
+  return `
+    CASE
+      WHEN ${geometryTypeSql} LIKE '%POINT%' THEN
+        CASE
+          WHEN COALESCE(ST_IsEmpty(${pointGeomSql}), true) THEN NULL
+          ELSE ST_AsGeoJSON(${pointGeomSql})
+        END
+      WHEN ${geometryTypeSql} LIKE '%LINE%' THEN
+        CASE
+          WHEN COALESCE(ST_IsEmpty(${lineGeomSql}), true) THEN NULL
+          ELSE ST_AsGeoJSON(${lineGeomSql})
+        END
+      ELSE
+        CASE
+          WHEN COALESCE(ST_IsEmpty(${polygonGeomSql}), true) THEN NULL
+          ELSE ST_AsGeoJSON(${polygonGeomSql})
+        END
+    END
+  `;
+}
+
+function buildWorldCupOriginSql(tableName) {
+  const normalizedTable = normalizeTableToken(tableName);
+  if (
+    normalizedTable === "obras_puntos" ||
+    normalizedTable === "obras_lineas" ||
+    normalizedTable === "puntos_bd_sig" ||
+    normalizedTable === "lineas_bd_sig" ||
+    normalizedTable === "puntos_db" ||
+    normalizedTable === "lineas_db"
+  ) {
+    return `COALESCE(row_data."ORIGEN DEL COMPROMISO"::text, '')`;
+  }
+  return `COALESCE(row_data.origen_del_compromiso::text, '')`;
+}
+
 // ── Construcción del GeoJSON desde PostGIS ────────────────────────────────────
 
 // Consulta una tabla y devuelve un FeatureCollection GeoJSON listo para Leaflet.
@@ -1779,11 +2446,20 @@ function getSimplifyTolerance(tableName) {
 //     (más rápido que hacerlo en Node porque evita transferir datos crudos)
 //   to_jsonb(row_data) - $1 → incluye todas las propiedades excepto la columna geom
 //     (evitar duplicar la geometría en las propiedades)
-async function getPostgisLayerGeoJson(tableName, geometryColumn) {
+async function getPostgisLayerGeoJson(tableName, geometryColumn, options = {}) {
+  const { mobile = false, bbox = null, filters = null } = options;
   const safeSchema = quoteIdentifier(GIS_SCHEMA);
   const safeTable = quoteIdentifier(tableName);
   const safeGeomColumn = geometryColumn ? quoteIdentifier(geometryColumn) : null;
-  const tolerance = getSimplifyTolerance(tableName);
+  const tableColumns = await getTableColumns(tableName);
+  const basePropertiesSql = buildRowPropertiesJsonSql(tableColumns, geometryColumn);
+  const contractFragments = buildContractEnrichmentFragments(
+    tableName,
+    basePropertiesSql,
+  );
+  const baseTolerance = getSimplifyTolerance(tableName);
+  // Mobile uses 2× tolerance → smaller payload, faster load on cellular
+  const tolerance = mobile ? baseTolerance * 2 : baseTolerance;
   const normalizedGeomSql = `
     CASE
       WHEN COALESCE(ST_SRID(${safeGeomColumn}), 0) = 4326 THEN ${safeGeomColumn}
@@ -1791,22 +2467,109 @@ async function getPostgisLayerGeoJson(tableName, geometryColumn) {
       ELSE ${safeGeomColumn}
     END
   `;
+  const renderableGeomSql = buildRenderableGeometrySql(tableName, normalizedGeomSql);
+  const safeGeoJsonGeometrySql = buildSafeGeoJsonGeometrySql(renderableGeomSql, "$1");
 
   logBackend(
-    `[GIS API] Consultando capa GeoJSON desde "${GIS_SCHEMA}"."${tableName}" (tolerance=${tolerance})`,
+    `[GIS API] Consultando capa GeoJSON desde "${GIS_SCHEMA}"."${tableName}" (tolerance=${tolerance}, mobile=${mobile})`,
   );
+
+  const hasAnyLayerFilter = Object.entries(filters || {}).some(([key, value]) =>
+    key === "year"
+      ? Boolean(normalizeKpiYearFilter(value))
+      : Boolean(normalizeLayerTextFilterValue(value))
+  );
+  const filterSql = hasAnyLayerFilter
+    ? buildLayerFilterSql(tableColumns, filters || {}, { startIndex: 7 })
+    : { sql: "TRUE", params: [] };
+  const hasBboxFilter = Boolean(
+    bbox &&
+      Number.isFinite(Number(bbox?.west)) &&
+      Number.isFinite(Number(bbox?.south)) &&
+      Number.isFinite(Number(bbox?.east)) &&
+      Number.isFinite(Number(bbox?.north))
+  );
+  const bboxSql = hasBboxFilter
+    ? `AND ST_Intersects(
+          ${normalizedGeomSql},
+          ST_MakeEnvelope($3::double precision, $4::double precision, $5::double precision, $6::double precision, 4326)
+        )`
+    : "";
+  const queryParams = [tolerance, geometryColumn];
+  const shouldReserveBboxSlots =
+    hasBboxFilter || (hasAnyLayerFilter && Array.isArray(filterSql.params) && filterSql.params.length > 0);
+  if (shouldReserveBboxSlots) {
+    queryParams.push(
+      hasBboxFilter ? Number(bbox.west) : null,
+      hasBboxFilter ? Number(bbox.south) : null,
+      hasBboxFilter ? Number(bbox.east) : null,
+      hasBboxFilter ? Number(bbox.north) : null,
+    );
+  }
+  if (hasAnyLayerFilter && Array.isArray(filterSql.params) && filterSql.params.length) {
+    queryParams.push(...filterSql.params);
+  }
 
   const result = await query(
     `
       SELECT
-        (to_jsonb(row_data) - ($2::text) - 'geometry' - 'geom' - 'the_geom') AS properties,
-        ST_AsGeoJSON(
-          ST_Simplify(${normalizedGeomSql}, ($1::double precision), true)
-        ) AS geometry_geojson
+        ${contractFragments.propertiesSql} AS properties,
+        ${safeGeoJsonGeometrySql} AS geometry_geojson
       FROM ${safeSchema}.${safeTable} AS row_data
+      ${contractFragments.joinSql}
       WHERE ${safeGeomColumn} IS NOT NULL
         AND ST_IsValid(${safeGeomColumn})
         AND NOT ST_IsEmpty(${safeGeomColumn})
+        ${bboxSql}
+        AND ${filterSql.sql}
+    `,
+    queryParams,
+  );
+
+  return buildGeoJsonFeatureCollection(result.rows, geometryColumn);
+}
+
+async function getMundialObrasForTable(tableName, geometryColumn, options = {}) {
+  const { mobile = false } = options;
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const safeTable = quoteIdentifier(tableName);
+  const safeGeomColumn = quoteIdentifier(geometryColumn);
+  const tableColumns = await getTableColumns(tableName);
+  const basePropertiesSql = buildRowPropertiesJsonSql(tableColumns, geometryColumn);
+  const contractFragments = buildContractEnrichmentFragments(
+    tableName,
+    basePropertiesSql,
+  );
+  const baseTolerance = getSimplifyTolerance(tableName);
+  const tolerance = mobile ? baseTolerance * 2 : baseTolerance;
+  const normalizedGeomSql = `
+    CASE
+      WHEN COALESCE(ST_SRID(${safeGeomColumn}), 0) = 4326 THEN ${safeGeomColumn}
+      WHEN COALESCE(ST_SRID(${safeGeomColumn}), 0) > 0 THEN ST_Transform(${safeGeomColumn}, 4326)
+      ELSE ${safeGeomColumn}
+    END
+  `;
+  const renderableGeomSql = buildRenderableGeometrySql(tableName, normalizedGeomSql);
+  const safeGeoJsonGeometrySql = buildSafeGeoJsonGeometrySql(renderableGeomSql, "$1");
+  const worldCupOriginSql = buildWorldCupOriginSql(tableName);
+
+  const result = await query(
+    `
+      SELECT
+        ${contractFragments.propertiesSql} AS properties,
+        ${safeGeoJsonGeometrySql} AS geometry_geojson
+      FROM ${safeSchema}.${safeTable} AS row_data
+      ${contractFragments.joinSql}
+      WHERE ${safeGeomColumn} IS NOT NULL
+        AND ST_IsValid(${safeGeomColumn})
+        AND NOT ST_IsEmpty(${safeGeomColumn})
+        AND (
+          LOWER(TRIM(${worldCupOriginSql})) LIKE '%obras del mundial%'
+          OR LOWER(TRIM(${worldCupOriginSql})) LIKE '%obras mundialistas%'
+          OR LOWER(TRIM(${worldCupOriginSql})) LIKE '%canchas mundialistas%'
+          OR LOWER(TRIM(${worldCupOriginSql})) LIKE '%canchas del mundial%'
+          OR LOWER(TRIM(${worldCupOriginSql})) LIKE '%vuelve el barrio%'
+        )
     `,
     [tolerance, geometryColumn],
   );
@@ -1824,8 +2587,12 @@ async function getTableRowsGeoJson(tableName) {
   return buildGeoJsonFeatureCollection(result.rows, null);
 }
 
-async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
-  const cachedLayer = getCachedLayerGeoJson(tableName);
+async function getCachedPostgisLayerGeoJson(tableName, geometryColumn, options = {}) {
+  const { mobile = false } = options;
+  // Mobile requests are cached separately (different simplification tolerance)
+  const cacheKey = mobile ? `${tableName}:mobile` : tableName;
+
+  const cachedLayer = getCachedLayerGeoJson(cacheKey);
   if (cachedLayer) {
     return {
       geojson: cachedLayer.geojson,
@@ -1834,7 +2601,7 @@ async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
     };
   }
 
-  const sharedRequest = layerGeoJsonInFlight.get(tableName);
+  const sharedRequest = layerGeoJsonInFlight.get(cacheKey);
   if (sharedRequest) {
     const sharedPayload = await sharedRequest;
     return {
@@ -1844,10 +2611,10 @@ async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
     };
   }
 
-  const requestPromise = getPostgisLayerGeoJson(tableName, geometryColumn)
+  const requestPromise = getPostgisLayerGeoJson(tableName, geometryColumn, { mobile })
     .then((geojson) => {
       const etag = buildWeakEtag(geojson);
-      layerGeoJsonCache.set(tableName, {
+      layerGeoJsonCache.set(cacheKey, {
         geojson,
         etag,
         cachedAt: Date.now(),
@@ -1855,10 +2622,10 @@ async function getCachedPostgisLayerGeoJson(tableName, geometryColumn) {
       return { geojson, etag };
     })
     .finally(() => {
-      layerGeoJsonInFlight.delete(tableName);
+      layerGeoJsonInFlight.delete(cacheKey);
     });
 
-  layerGeoJsonInFlight.set(tableName, requestPromise);
+  layerGeoJsonInFlight.set(cacheKey, requestPromise);
   const payload = await requestPromise;
   return {
     geojson: payload.geojson,
@@ -1903,7 +2670,11 @@ async function handleTest(_req, res) {
 async function handleLayers(req, res) {
   try {
     const catalog = await getLayerCatalog();
-    const tables = catalog.map((table) => ({
+    const coreTables = catalog.filter((table) =>
+      isCoreOperationalTableName(table?.table_name || table?.name),
+    );
+    const sourceTables = coreTables.length ? coreTables : catalog;
+    const tables = sourceTables.map((table) => ({
       name: table.name,
       table_name: table.table_name,
       table_schema: table.table_schema,
@@ -1921,6 +2692,9 @@ async function handleLayers(req, res) {
       tables,
       total: tables.length,
     };
+    console.log(
+      `[GIS API] /layers -> ${tables.length} tablas devueltas (${coreTables.length ? "modo core" : "modo completo"})`,
+    );
     sendJsonWithEtag(req, res, payload, "public, max-age=60");
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
@@ -1949,15 +2723,53 @@ async function handleLayerTable(req, res) {
     let geojson = null;
     let responseEtag = null;
     let cacheStatus = 'miss';
+    const bboxFilter = parseLayerBboxQuery(req.query || {});
+    const layerFilters = {
+      year: req.query?.year ?? req.query?.anio ?? null,
+      status: req.query?.status ?? null,
+      program: req.query?.program ?? null,
+      dependency: req.query?.dependency ?? null,
+      eje: req.query?.eje ?? null,
+      workType: req.query?.workType ?? req.query?.work_type ?? null,
+      alcaldia: req.query?.alcaldia ?? null,
+      colonia: req.query?.colonia ?? null,
+      empresa: req.query?.empresa ?? null,
+      contract: req.query?.contract ?? req.query?.contrato ?? null,
+    };
+    const hasLayerFilters = Object.entries(layerFilters).some(([key, value]) =>
+      key === "year"
+        ? Boolean(normalizeKpiYearFilter(value))
+        : Boolean(normalizeLayerTextFilterValue(value))
+    );
+    const hasConstrainedQuery = Boolean(bboxFilter || hasLayerFilters);
+
+    const isMobileRequest =
+      String(req.query.mobile || '').toLowerCase() === 'true' ||
+      /Mobi|Android|iPhone|iPad/i.test(req.get('User-Agent') || '');
 
     if (metadata.has_geom && metadata.geometry_column) {
-      const cached = await getCachedPostgisLayerGeoJson(
-        metadata.table_name,
-        metadata.geometry_column,
-      );
-      geojson = cached.geojson;
-      cacheStatus = cached.cacheStatus;
-      responseEtag = cached.etag;
+      if (hasConstrainedQuery) {
+        geojson = await getPostgisLayerGeoJson(
+          metadata.table_name,
+          metadata.geometry_column,
+          {
+            mobile: isMobileRequest,
+            bbox: bboxFilter,
+            filters: layerFilters,
+          }
+        );
+        responseEtag = buildWeakEtag(geojson);
+        cacheStatus = "filtered";
+      } else {
+        const cached = await getCachedPostgisLayerGeoJson(
+          metadata.table_name,
+          metadata.geometry_column,
+          { mobile: isMobileRequest },
+        );
+        geojson = cached.geojson;
+        cacheStatus = cached.cacheStatus;
+        responseEtag = cached.etag;
+      }
     } else {
       geojson = await getTableRowsGeoJson(metadata.table_name);
       responseEtag = buildWeakEtag(geojson);
@@ -1972,9 +2784,340 @@ async function handleLayerTable(req, res) {
         return;
       }
     }
-    res.set("Cache-Control", "public, max-age=600");
+    res.set("Cache-Control", hasConstrainedQuery ? "public, max-age=30" : "public, max-age=600");
     res.set("X-GIS-Cache", cacheStatus);
     res.json(geojson);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+function parseObrasTableList(rawValue) {
+  if (!rawValue) {
+    const envTables = String(process.env.GIS_OBRAS_TABLES || "")
+      .split(",")
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+    return envTables.length ? envTables : [...DEFAULT_OBRAS_SPLIT_TABLES];
+  }
+  const list = String(rawValue)
+    .split(",")
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean);
+  return list.length ? list : [...DEFAULT_OBRAS_SPLIT_TABLES];
+}
+
+function normalizeTableToken(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9_]+/g, "")
+    .trim();
+}
+
+function isCoreOperationalTableName(tableName) {
+  const normalized = normalizeTableToken(tableName);
+  if (!normalized) return false;
+  return CORE_OPERATIONAL_TABLE_NAMES.some(
+    (candidate) => normalizeTableToken(candidate) === normalized,
+  );
+}
+
+function classifyObrasTableFamily(tableName) {
+  const normalized = normalizeTableToken(tableName);
+  if (!normalized) return null;
+  if (/(punto|point)/.test(normalized)) return "point";
+  if (/(linea|line|vial)/.test(normalized)) return "line";
+  if (/(polig|polygon|area)/.test(normalized)) return "polygon";
+  return null;
+}
+
+function pickFirstTableByPattern(catalogRows = [], geometryPattern, namePattern) {
+  const match = catalogRows.find((row) => {
+    const geometryType = String(row?.geometry_type || "").toUpperCase();
+    const tableName = normalizeTableToken(row?.table_name || row?.name || "");
+    if (!tableName) return false;
+    if (!geometryPattern.test(geometryType)) return false;
+    return namePattern.test(tableName);
+  });
+  return String(match?.table_name || match?.name || "").trim();
+}
+
+async function discoverObrasSplitTables() {
+  try {
+    const catalog = await getLayerCatalog();
+    const rows = (Array.isArray(catalog) ? catalog : []).filter(
+      (row) => row?.has_geom
+    );
+    const discovered = [
+      pickFirstTableByPattern(rows, /POINT/, /(punto|point)/),
+      pickFirstTableByPattern(rows, /LINE/, /(linea|line|vial)/),
+      pickFirstTableByPattern(rows, /POLYGON/, /(polig|polygon|area)/),
+    ].filter(Boolean);
+    return Array.from(new Set(discovered));
+  } catch {
+    return [];
+  }
+}
+
+function ensureFeatureGeometryType(feature) {
+  const geometryType = String(feature?.geometry?.type || "")
+    .trim()
+    .toUpperCase();
+  if (!geometryType) return feature;
+  return {
+    ...feature,
+    properties: {
+      ...(feature?.properties || {}),
+      geometry_type:
+        feature?.properties?.geometry_type ||
+        feature?.properties?.GEOMETRY_TYPE ||
+        geometryType,
+    },
+  };
+}
+
+async function handleObras(req, res) {
+  const requestedTables = parseObrasTableList(req.query?.tables);
+  let tableNames = [...requestedTables];
+
+  try {
+    const fetchTablesPayload = async (targetTables) =>
+      Promise.all(
+        (Array.isArray(targetTables) ? targetTables : []).map(async (tableName) => {
+          const metadata = await getTableMeta(tableName);
+          if (!metadata?.has_geom || !metadata?.geometry_column) {
+            return null;
+          }
+          const cached = await getCachedPostgisLayerGeoJson(
+            metadata.table_name,
+            metadata.geometry_column,
+          );
+          return {
+            table_name: metadata.table_name,
+            features: Array.isArray(cached?.geojson?.features)
+              ? cached.geojson.features
+              : [],
+          };
+        }),
+      );
+
+    let tablePayloads = await fetchTablesPayload(tableNames);
+    const loadedCount = tablePayloads.filter(Boolean).length;
+    const discoveredTables = await discoverObrasSplitTables();
+
+    if (!loadedCount) {
+      if (discoveredTables.length) {
+        tableNames = discoveredTables;
+        tablePayloads = await fetchTablesPayload(tableNames);
+      }
+    } else if (discoveredTables.length) {
+      const loadedTableTokens = new Set(
+        tablePayloads
+          .filter(Boolean)
+          .map((payload) => normalizeTableToken(payload?.table_name || ""))
+          .filter(Boolean),
+      );
+      const loadedFamilies = new Set(
+        tablePayloads
+          .filter(Boolean)
+          .map((payload) => classifyObrasTableFamily(payload?.table_name))
+          .filter(Boolean),
+      );
+
+      const discoveredMissingByName = discoveredTables.filter(
+        (table) => !loadedTableTokens.has(normalizeTableToken(table)),
+      );
+      const discoveredMissingByFamily = discoveredTables.filter((table) => {
+        const family = classifyObrasTableFamily(table);
+        return family ? !loadedFamilies.has(family) : false;
+      });
+      const additionalTables = Array.from(
+        new Set([...discoveredMissingByName, ...discoveredMissingByFamily]),
+      );
+
+      if (additionalTables.length) {
+        const additionalPayloads = await fetchTablesPayload(additionalTables);
+        tablePayloads = [...tablePayloads, ...additionalPayloads];
+        tableNames = Array.from(new Set([...tableNames, ...additionalTables]));
+      }
+    }
+
+    const rawFeatures = tablePayloads
+      .filter(Boolean)
+      .flatMap((payload) =>
+        (payload.features || []).map((feature) =>
+          ensureFeatureGeometryType({
+            ...feature,
+            properties: {
+              ...(feature?.properties || {}),
+              source_table:
+                feature?.properties?.source_table ||
+                payload.table_name,
+            },
+          }),
+        ),
+      );
+    const features = rawFeatures.filter(
+      (feature) =>
+        feature?.geometry &&
+        typeof feature.geometry === "object" &&
+        String(feature?.geometry?.type || "").trim() !== "",
+    );
+    const droppedFeatures = Math.max(0, rawFeatures.length - features.length);
+    console.log("[GIS API] /obras TOTAL FEATURES:", features.length);
+    if (droppedFeatures > 0) {
+      console.log(
+        "[GIS API] /obras FEATURES DESCARTADAS (sin geometría válida):",
+        droppedFeatures,
+      );
+    }
+
+    const payload = {
+      type: "FeatureCollection",
+      features,
+      total: features.length,
+      tables: tableNames,
+    };
+
+    sendJsonWithEtag(req, res, payload, "public, max-age=60");
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+async function handleObrasWorldCup(req, res) {
+  const mobileParam =
+    req.query?.mobile === '1' || req.query?.mobile === 'true';
+  const cacheKey = mobileParam ? 'mobile' : 'desktop';
+
+  const cached = mundialObrasCacheByKey.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < MUNDIAL_OBRAS_CACHE_TTL_MS) {
+    return sendJsonWithEtag(req, res, cached.payload, 'public, max-age=180');
+  }
+
+  try {
+    const tables = ['obras_puntos', 'obras_lineas', 'obras_poligonos'];
+    const results = await Promise.all(
+      tables.map(async (tableName) => {
+        try {
+          const metadata = await getTableMeta(tableName);
+          if (!metadata?.has_geom || !metadata?.geometry_column) return null;
+          const geojson = await getMundialObrasForTable(
+            metadata.table_name,
+            metadata.geometry_column,
+            { mobile: mobileParam },
+          );
+          return {
+            tableName: metadata.table_name,
+            features: Array.isArray(geojson?.features) ? geojson.features : [],
+          };
+        } catch (tableError) {
+          logBackendError(
+            `[GIS API] /obras/mundial error en tabla "${tableName}":`,
+            tableError.message,
+          );
+          return null;
+        }
+      }),
+    );
+
+    const allFeatures = results
+      .filter(Boolean)
+      .flatMap(({ tableName, features }) =>
+        features.map((feature) =>
+          ensureFeatureGeometryType({
+            ...feature,
+            properties: {
+              ...(feature?.properties || {}),
+              source_table: feature?.properties?.source_table || tableName,
+            },
+          }),
+        ),
+      )
+      .filter(
+        (feature) =>
+          feature?.geometry &&
+          typeof feature.geometry === 'object' &&
+          String(feature?.geometry?.type || '').trim() !== '',
+      );
+
+    const payload = {
+      type: 'FeatureCollection',
+      features: allFeatures,
+      total: allFeatures.length,
+      filter: "origen_del_compromiso ILIKE '%obras del mundial%'",
+      mobile: mobileParam,
+    };
+
+    mundialObrasCacheByKey.set(cacheKey, { payload, cachedAt: Date.now() });
+    console.log(`[GIS API] /obras/mundial TOTAL FEATURES:`, allFeatures.length, `(mobile=${mobileParam})`);
+    sendJsonWithEtag(req, res, payload, 'public, max-age=180');
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+}
+
+async function getWorldCupKpiSummary() {
+  const now = Date.now();
+  if (worldCupKpiCache && now - worldCupKpiCacheTime < KPI_CACHE_TTL_MS) {
+    return worldCupKpiCache;
+  }
+
+  const safeSchema = quoteIdentifier(GIS_SCHEMA);
+  const statusCaseSql = buildStatusKeyCaseSql(quoteIdentifier("estatus"));
+  const result = await query(`
+    WITH mundial AS (
+      SELECT "estatus" FROM ${safeSchema}."obras_puntos"
+        WHERE "origen_del_compromiso"::text ILIKE ANY(ARRAY['%obras del mundial%','%obras mundialistas%','%canchas mundialistas%','%canchas del mundial%','%vuelve el barrio%'])
+      UNION ALL
+      SELECT "estatus" FROM ${safeSchema}."obras_lineas"
+        WHERE "origen_del_compromiso"::text ILIKE ANY(ARRAY['%obras del mundial%','%obras mundialistas%','%canchas mundialistas%','%canchas del mundial%','%vuelve el barrio%'])
+      UNION ALL
+      SELECT "estatus" FROM ${safeSchema}."obras_poligonos"
+        WHERE "origen_del_compromiso"::text ILIKE ANY(ARRAY['%obras del mundial%','%obras mundialistas%','%canchas mundialistas%','%canchas del mundial%','%vuelve el barrio%'])
+    ),
+    normalized AS (
+      SELECT ${statusCaseSql} AS status_key FROM mundial
+    )
+    SELECT
+      COUNT(*)::bigint AS total_obras,
+      COUNT(*) FILTER (WHERE status_key = 'entregado')::bigint AS entregadas,
+      COUNT(*) FILTER (WHERE status_key = 'terminado')::bigint AS terminadas,
+      COUNT(*) FILTER (WHERE status_key = 'proceso')::bigint AS en_proceso,
+      COUNT(*) FILTER (WHERE status_key = 'sin_iniciar')::bigint AS sin_iniciar
+    FROM normalized
+  `);
+
+  const row = result.rows[0] || {};
+  const payload = {
+    generated_at: new Date().toISOString(),
+    cache_ttl_ms: KPI_CACHE_TTL_MS,
+    filter: "origen_del_compromiso ILIKE '%obras del mundial%'",
+    totals: {
+      total_obras: Number(row.total_obras || 0),
+      entregadas: Number(row.entregadas || 0),
+      terminadas: Number(row.terminadas || 0),
+      en_proceso: Number(row.en_proceso || 0),
+      sin_iniciar: Number(row.sin_iniciar || 0),
+    },
+  };
+
+  worldCupKpiCache = payload;
+  worldCupKpiCacheTime = now;
+  return payload;
+}
+
+async function handleKpiWorldcup(req, res) {
+  try {
+    const forceParam = String(req.query?.force || "").toLowerCase();
+    if (forceParam === "1" || forceParam === "true" || forceParam === "yes") {
+      worldCupKpiCache = null;
+      worldCupKpiCacheTime = 0;
+    }
+    const summary = await getWorldCupKpiSummary();
+    sendJsonWithEtag(req, res, { ok: true, ...summary }, "public, max-age=60");
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   }
@@ -1983,16 +3126,20 @@ async function handleLayerTable(req, res) {
 async function handleKpiSummary(req, res) {
   try {
     const forceParam = String(req.query?.force || "").toLowerCase();
+    const requestedYearFilter = normalizeKpiYearFilter(
+      req.query?.year ?? req.query?.anio ?? req.query?.year_filter
+    );
     const forceRefresh =
       forceParam === "1" || forceParam === "true" || forceParam === "yes";
     if (forceRefresh) {
       invalidateKpiSummaryCache();
     }
-    const summary = await getKpiSummaryCatalog();
+    const summary = await getKpiSummaryCatalog({ yearFilter: requestedYearFilter });
+    const summaryWithOverrides = applyKpiFixedTotalOverride(summary);
     const payload = {
       ok: true,
       message: "KPIs ejecutivos calculados correctamente.",
-      ...summary,
+      ...summaryWithOverrides,
     };
     kpiRouteHealthCache = {
       checked_at: new Date().toISOString(),
@@ -2000,7 +3147,7 @@ async function handleKpiSummary(req, res) {
       ok: true,
       source: "kpi_summary",
       error: null,
-      total_obras: Number(summary?.totals?.total_obras || 0),
+      total_obras: Number(summaryWithOverrides?.totals?.total_obras || 0),
     };
     sendJsonWithEtag(req, res, payload, "public, max-age=60");
   } catch (error) {
@@ -2117,6 +3264,7 @@ function handleCacheInvalidate(req, res) {
   invalidateCatalogCache();
   invalidateLayerGeoJsonCache();
   invalidateKpiSummaryCache();
+  mundialObrasCacheByKey.clear();
   logBackend("[GIS API] Caché de catálogo invalidado manualmente");
   res.json({ ok: true, message: "Caché de catálogo invalidado." });
 }
@@ -2167,11 +3315,16 @@ async function handlePopulationQuery(req, res) {
 // Nombres de columna (en minúsculas) que se consideran campos de búsqueda.
 // Se comparan contra information_schema.columns.column_name (case-insensitive).
 const SEARCH_FIELD_NAMES = new Set([
+  'id',
+  'uuid',
+  'clave_unica',
   'nombre_obra', 'obra',
   'programa',
   'direccion_general', 'dg',
   'alcaldia',
   'colonia',
+  'calle_domicilio',
+  'origen_del_compromiso',
   'plantel', 'nombre_plantel',
   'nombre_sitio_intervenido',
   'calle', 'direccion',
@@ -2452,12 +3605,16 @@ for (const prefix of ["", "/api"]) {
   app.get(`${prefix}/health`, handleHealth);
   app.get(`${prefix}/test`, handleTest);
   app.get(`${prefix}/search`, handleSearch);
+  app.get(`${prefix}/obras/mundial`, handleObrasWorldCup);
+  app.get(`${prefix}/obras`, handleObras);
   app.get(`${prefix}/layers`, handleLayers);
   app.get(`${prefix}/layer/:table`, handleLayerTable);
   app.get(`${prefix}/kpi/audit`, handleKpiAudit);
   app.get(`${prefix}/kpi/summary`, handleKpiSummary);
+  app.get(`${prefix}/kpi/worldcup`, handleKpiWorldcup);
   app.get(`${prefix}/kpis/audit`, handleKpiAudit);
   app.get(`${prefix}/kpis/summary`, handleKpiSummary);
+  app.get(`${prefix}/kpis/worldcup`, handleKpiWorldcup);
   app.get(`${prefix}/population/query`, handlePopulationQuery);
   app.post(`${prefix}/cache/invalidate`, handleCacheInvalidate);
 }
@@ -2468,8 +3625,11 @@ logBackend("[GIS API] Ruta /api/kpi/audit disponible");
 logBackend("[GIS API] Ruta /api/kpi/summary disponible");
 logBackend("[GIS API] Ruta /api/kpis/audit disponible");
 logBackend("[GIS API] Ruta /api/kpis/summary disponible");
+logBackend("[GIS API] Ruta /api/kpis/worldcup disponible");
 logBackend("[GIS API] Ruta /api/population/query disponible");
 logBackend("[GIS API] Ruta /api/search disponible");
+logBackend("[GIS API] Ruta /api/obras disponible");
+logBackend("[GIS API] Ruta /api/obras/mundial disponible");
 
 // Rutas de gestión — solo bajo /api
 app.get("/api/debug", handleDebug);
